@@ -89,4 +89,35 @@ app.post('/api/progress', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Serwer działa na porcie ${PORT}`);
+
+// 5. Rejestracja nowego użytkownika
+app.post('/api/register', (req, res) => {
+    const { username, password, name } = req.body;
+
+    // Sprawdź czy użytkownik już istnieje
+    const existingUser = USERS.find(u => u.username === username);
+    if (existingUser) {
+        return res.status(400).json({ success: false, message: 'Ten login jest zajęty' });
+    }
+
+    // Tworzymy nowego użytkownika
+    // Domyślnie dajemy mu rolę 'user' i przypisujemy do pierwszej drużyny
+    const newUser = {
+        id: USERS.length + 1, // Proste generowanie ID
+        username: username,
+        password: password,
+        role: 'user',
+        teamId: 'team_las', // Możesz to zmienić na wybór z listy w UI
+        name: name || 'Nowy Harcerz'
+    };
+
+    USERS.push(newUser);
+    
+    // Logujemy go od razu po rejestracji (opcjonalnie)
+    res.json({ 
+        success: true, 
+        user: { id: newUser.id, username: newUser.username, role: newUser.role, teamId: newUser.teamId, name: newUser.name } 
+    });
+});
+
 });
