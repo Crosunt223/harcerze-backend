@@ -6,7 +6,7 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// Prosta funkcja haszująca dla bezpieczeństwa
+// --- POMOCNICZE ---
 const simpleHash = (str) => {
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
@@ -16,12 +16,11 @@ const simpleHash = (str) => {
     return hash.toString();
 };
 
-// --- TWOJA BAZA DANYCH (Zaktualizowana) ---
+// --- BAZA DANYCH (Symulacja w RAM) ---
 let USERS = [
     { id: 1, username: 'admin1', password: simpleHash('123'), role: 'admin', teamId: 'team_las', name: 'Druh Boruch', status: 'active' },
     { id: 4, username: 'admin2', password: simpleHash('123'), role: 'admin', teamId: 'team_woda', name: 'Druh Wodnik', status: 'active' }
 ];
-
 let USER_PROGRESS = {};
 
 // --- ENDPOINTY ---
@@ -37,12 +36,12 @@ app.post('/api/register', (req, res) => {
         username,
         password: simpleHash(password),
         role: 'user',
-        teamId: teamId || null,
+        teamId: teamId || null, // Może być null jeśli nie wybrano
         name,
-        status: 'pending' // Nowe konto zawsze oczekuje
+        status: 'pending'
     };
     USERS.push(newUser);
-    res.json({ success: true, message: 'Konto utworzone. Czekaj na akceptację drużynowego.' });
+    res.json({ success: true, message: 'Konto utworzone. Czekaj na akceptację.' });
 });
 
 // Logowanie
@@ -50,13 +49,13 @@ app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
     const user = USERS.find(u => u.username === username && u.password === simpleHash(password));
     
-    if (!user) return res.status(401).json({ success: false, message: 'Błędne dane logowania.' });
-    if (user.status !== 'active') return res.status(403).json({ success: false, message: 'Twoje konto jeszcze nie zostało zaakceptowane.' });
+    if (!user) return res.status(401).json({ success: false, message: 'Błędny login lub hasło.' });
+    if (user.status !== 'active') return res.status(403).json({ success: false, message: 'Konto oczekuje na akceptację.' });
     
     res.json({ success: true, user });
 });
 
-// Pobieranie członków (tylko dla admina danej drużyny)
+// Pobieranie członków drużyny
 app.get('/api/team-members', (req, res) => {
     const adminId = parseInt(req.query.adminId);
     const admin = USERS.find(u => u.id === adminId);
@@ -66,7 +65,7 @@ app.get('/api/team-members', (req, res) => {
     res.json(members);
 });
 
-// Akceptacja użytkownika
+// Zmiana statusu (Akceptacja)
 app.post('/api/change-status', (req, res) => {
     const { adminId, targetUserId, newStatus } = req.body;
     const admin = USERS.find(u => u.id === adminId);
@@ -80,14 +79,14 @@ app.post('/api/change-status', (req, res) => {
     res.json({ success: true });
 });
 
-// USUWANIE UŻYTKOWNIKA
+// Usuwanie użytkownika
 app.post('/api/delete-user', (req, res) => {
     const { adminId, targetUserId } = req.body;
     const admin = USERS.find(u => u.id === adminId);
     const target = USERS.find(u => u.id === targetUserId);
 
     if (!admin || admin.role !== 'admin' || !target || target.teamId !== admin.teamId) {
-        return res.status(403).json({ success: false, message: 'Brak uprawnień do usunięcia tego profilu.' });
+        return res.status(403).json({ success: false, message: 'Brak uprawnień' });
     }
 
     USERS = USERS.filter(u => u.id !== targetUserId);
@@ -108,4 +107,4 @@ app.post('/api/progress', (req, res) => {
     res.json({ success: true });
 });
 
-app.listen(3000, () => console.log('Serwer działa na http://localhost:3000'));
+app.listen(3000, () => console.log('Server running on port 3000'));
