@@ -34,7 +34,7 @@ const userSchema = new mongoose.Schema({
     username:     { type: String, required: true, unique: true, lowercase: true, trim: true },
     passwordHash: { type: String, required: true },
     name:         { type: String, required: true },
-    role:         { type: String, enum: ['superadmin','admin','user'], default: 'user' },
+    role:         { type: String, enum: ['superadmin','ksis','instruktor','druzynowy','zastepowy','podzastepowy','user'], default: 'user' },
     teamId:       { type: String, default: null },
     status:       { type: String, enum: ['active','pending','rejected'], default: 'pending' }
 }, { timestamps: true });
@@ -97,8 +97,22 @@ function requireAuth(req, res, next) {
     }
 }
 
+// Kolejnosc hierarchii — im nizszy indeks, tym wyzszy rang
+const HIERARCHY = ['superadmin','ksis','instruktor','druzynowy','zastepowy','podzastepowy','user'];
+
+function rankIndex(role) {
+    var i = HIERARCHY.indexOf(role);
+    return i === -1 ? 999 : i;
+}
+
+// Czy role A jest wyzsza od roli B?
+function isHigherThan(roleA, roleB) {
+    return rankIndex(roleA) < rankIndex(roleB);
+}
+
+// Czy ma uprawnienia do zarzadzania (ksis i wyzej)
 function requireAdmin(req, res, next) {
-    if (!['admin','superadmin'].includes(req.user.role))
+    if (!['superadmin','ksis','instruktor','druzynowy','zastepowy'].includes(req.user.role))
         return res.status(403).json({ error: 'Brak uprawnien' });
     next();
 }
@@ -130,9 +144,10 @@ app.post('/api/register', async (req, res) => {
         if (!(await Team.findOne({ teamId })))
             return res.status(400).json({ success: false, message: 'Druzyna nie istnieje' });
 
-        const juzMaAdmina = await User.findOne({ teamId, role: 'admin', status: 'active' });
-        const role   = juzMaAdmina ? 'user'    : 'admin';
-        const status = juzMaAdmina ? 'pending' : 'active';
+        // Jesli nikt w druzynie nie ma rangi druzynowego lub wyzszej -> pierwszy user zostaje druzynowym
+        const juzMaDruzynowego = await User.findOne({ teamId, role: { $in: ['ksis','instruktor','druzynowy'] }, status: 'active' });
+        const role   = juzMaDruzynowego ? 'user'    : 'druzynowy';
+        const status = juzMaDruzynowego ? 'pending' : 'active';
 
         await User.create({
             username: username.toLowerCase().trim(),
@@ -239,7 +254,7 @@ app.get('/api/team-members', requireAuth, requireAdmin, async (req, res) => {
     try {
         const filter = req.user.role === 'superadmin'
             ? { role: { $ne: 'superadmin' } }
-            : { teamId: req.user.teamId, role: { $ne: 'superadmin' } };
+            : { teamId: req.user.teamId };
         const members = await User.find(filter, '-passwordHash').sort({ status: 1, name: 1 });
         res.json(members);
     } catch (err) {
@@ -292,6 +307,56 @@ app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
         await User.findByIdAndDelete(req.params.id);
         await Progress.deleteOne({ userId: req.params.id });
         res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Blad serwera' });
+    }
+});
+
+// Zmien role uzytkownika
+// Body: { newRole }
+// Zasada: mozesz nadac tylko role NIZSZE od swojej wlasnej
+//         nie mozesz zmieniac roli osob rownych lub wyzszych od siebie
+app.post('/api/users/:id/promote', requireAuth, async (req, res) => {
+    try {
+        const { newRole } = req.body;
+        if (!newRole) return res.status(400).json({ error: 'Podaj nowa role' });
+
+        const validRoles = ['ksis','instruktor','druzynowy','zastepowy','podzastepowy','user'];
+        if (!validRoles.includes(newRole) && req.user.role !== 'superadmin')
+            return res.status(400).json({ error: 'Nieprawidlowa rola' });
+
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
+        if (user.role === 'superadmin')
+            return res.status(403).json({ error: 'Nie mozna zmienic roli super-admina' });
+
+        // Sprawdz czy wykonujacy ma wyzsza range niz cel
+        if (req.user.role !== 'superadmin') {
+            if (!isHigherThan(req.user.role, user.role))
+                return res.status(403).json({ error: 'Nie mozesz zmienic roli osoby o tej samej lub wyzszej randze' });
+            // Sprawdz czy nadawana rola jest nizsza od nadajacego
+            if (!isHigherThan(req.user.role, newRole))
+                return res.status(403).json({ error: 'Mozesz nadac tylko role nizsze od swojej (' + req.user.role + ')' });
+            // Sprawdz druzyne
+            if (user.teamId !== req.user.teamId)
+                return res.status(403).json({ error: 'Brak uprawnien do tej druzyny' });
+        }
+
+        user.role = newRole;
+        if (user.status !== 'active') user.status = 'active';
+        await user.save();
+        res.json({ success: true, newRole: user.role });
+    } catch (err) {
+        res.status(500).json({ error: 'Blad serwera' });
+    }
+});
+
+// Pobierz info o druzynie usera (nazwa druzyny)
+app.get('/api/my-team', requireAuth, async (req, res) => {
+    try {
+        if (!req.user.teamId) return res.json({ teamName: null });
+        const team = await Team.findOne({ teamId: req.user.teamId });
+        res.json({ teamName: team ? team.name : null, teamId: req.user.teamId });
     } catch (err) {
         res.status(500).json({ error: 'Blad serwera' });
     }
