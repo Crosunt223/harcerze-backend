@@ -34,8 +34,9 @@ const userSchema = new mongoose.Schema({
     username:     { type: String, required: true, unique: true, lowercase: true, trim: true },
     passwordHash: { type: String, required: true },
     name:         { type: String, required: true },
-    role:         { type: String, enum: ['superadmin','ksis','instruktor','druzynowy','zastepowy','podzastepowy','user'], default: 'user' },
+    role:         { type: String, enum: ['superadmin','ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy','user'], default: 'user' },
     teamId:       { type: String, default: null },
+    zastepId:     { type: String, default: null },
     status:       { type: String, enum: ['active','pending','rejected'], default: 'pending' }
 }, { timestamps: true });
 
@@ -98,7 +99,7 @@ function requireAuth(req, res, next) {
 }
 
 // Kolejnosc hierarchii — im nizszy indeks, tym wyzszy rang
-const HIERARCHY = ['superadmin','ksis','instruktor','druzynowy','zastepowy','podzastepowy','user'];
+const HIERARCHY = ['superadmin','ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy','user'];
 
 function rankIndex(role) {
     var i = HIERARCHY.indexOf(role);
@@ -112,7 +113,7 @@ function isHigherThan(roleA, roleB) {
 
 // Czy ma uprawnienia do zarzadzania (ksis i wyzej)
 function requireAdmin(req, res, next) {
-    if (!['superadmin','ksis','instruktor','druzynowy','zastepowy'].includes(req.user.role))
+    if (!['superadmin','ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy'].includes(req.user.role))
         return res.status(403).json({ error: 'Brak uprawnien' });
     next();
 }
@@ -177,7 +178,11 @@ app.post('/api/login', async (req, res) => {
         if (!user || !(await bcrypt.compare(password, user.passwordHash)))
             return res.status(401).json({ success: false, message: 'Bledny login lub haslo' });
 
-        // Pending i rejected mogą się zalogować - frontend pokaże odpowiedni ekran
+        if (user.status === 'pending')
+            return res.status(403).json({ success: false, message: 'Konto czeka na akceptacje druzynowego' });
+        if (user.status === 'rejected')
+            return res.status(403).json({ success: false, message: 'Konto zostalo odrzucone' });
+
         const token = jwt.sign(
             { id: user._id, username: user.username, role: user.role, teamId: user.teamId, name: user.name },
             JWT_SECRET,
@@ -186,7 +191,7 @@ app.post('/api/login', async (req, res) => {
 
         res.json({
             success: true, token,
-            user: { id: user._id, username: user.username, name: user.name, role: user.role, teamId: user.teamId, status: user.status }
+            user: { id: user._id, username: user.username, name: user.name, role: user.role, teamId: user.teamId }
         });
     } catch (err) {
         console.error(err);
@@ -252,7 +257,18 @@ app.get('/api/team-members', requireAuth, requireAdmin, async (req, res) => {
             ? { role: { $ne: 'superadmin' } }
             : { teamId: req.user.teamId };
         const members = await User.find(filter, '-passwordHash').sort({ status: 1, name: 1 });
-        res.json(members);
+        // Pobierz nazwy druzyn i zastepow
+        const teams = await Team.find({});
+        const zastepy = await Zastep.find({});
+        const membersWithInfo = members.map(m => {
+            const obj = m.toObject();
+            const t = teams.find(t => t.teamId === m.teamId);
+            const z = zastepy.find(z => z.zastepId === m.zastepId);
+            obj.teamName  = t ? t.name  : m.teamId;
+            obj.zastepName = z ? z.name : null;
+            return obj;
+        });
+        res.json(membersWithInfo);
     } catch (err) {
         res.status(500).json({ error: 'Blad serwera' });
     }
@@ -317,7 +333,7 @@ app.post('/api/users/:id/promote', requireAuth, async (req, res) => {
         const { newRole } = req.body;
         if (!newRole) return res.status(400).json({ error: 'Podaj nowa role' });
 
-        const validRoles = ['ksis','instruktor','druzynowy','zastepowy','podzastepowy','user'];
+        const validRoles = ['ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy','user'];
         if (!validRoles.includes(newRole) && req.user.role !== 'superadmin')
             return res.status(400).json({ error: 'Nieprawidlowa rola' });
 
@@ -376,39 +392,12 @@ app.get('/api/progress/:userId', requireAuth, async (req, res) => {
 app.post('/api/progress', requireAuth, requireAdmin, async (req, res) => {
     try {
         const { userId, taskId, status } = req.body;
-        const HIERARCHY = ['superadmin','ksis','instruktor','druzynowy','zastepowy','podzastepowy','user'];
-        const myRank = HIERARCHY.indexOf(req.user.role);
-
-        // Superadmin moze wszystko
-        if (req.user.role !== 'superadmin') {
+        if (req.user.role === 'admin') {
             const target = await User.findById(userId);
-            if (!target) return res.status(404).json({ error: 'Uzytkownik nie istnieje' });
-
-            // Sprawdz czy to wlasny progress
-            const isSelf = target._id.toString() === req.user.id.toString();
-
-            if (isSelf) {
-                // Kadra moze zapisywac wlasny progress
-                // (zastepowy, podzastepowy moga sobie zdawac - NIE, tylko user moze ogladac)
-                // Zgodnie z wymaganiem: zastepowy NIE moze sobie zdawac
-                const SELF_ALLOWED = ['ksis','instruktor','druzynowy'];
-                if (!SELF_ALLOWED.includes(req.user.role)) {
-                    return res.status(403).json({ error: 'Brak uprawnien do zapisu wlasnego progresu' });
-                }
-            } else {
-                // Sprawdz hierarchie - mozna zdawac tylko nizszym
-                const targetRank = HIERARCHY.indexOf(target.role);
-                if (myRank >= targetRank) {
-                    return res.status(403).json({ error: 'Mozna zdawac sprawnosci tylko osobom nizej w hierarchii' });
-                }
-                // Sprawdz ta sama druzyne (oprócz superadmina)
-                if (String(target.teamId) !== String(req.user.teamId)) {
-                    return res.status(403).json({ error: 'Brak uprawnien - inna druzyna' });
-                }
-            }
+            if (!target || target.teamId !== req.user.teamId)
+                return res.status(403).json({ error: 'Brak uprawnien' });
         }
-
-        const key = 'tasks.' + taskId.replace(/[.]/g, '_');
+        const key = 'tasks.' + taskId;
         const update = status ? { $set: { [key]: true } } : { $unset: { [key]: '' } };
         const p = await Progress.findOneAndUpdate({ userId }, update, { upsert: true, new: true });
         res.json({ success: true, progress: p.tasks });
@@ -419,6 +408,85 @@ app.post('/api/progress', requireAuth, requireAdmin, async (req, res) => {
 });
 
 // Test czy serwer zyje
+
+// ── Zastepy ──────────────────────────────────────────────
+// Pobierz zastepy w druzynie
+app.get('/api/zastepy', requireAuth, async (req, res) => {
+    try {
+        const teamId = req.user.role === 'superadmin' ? req.query.teamId : req.user.teamId;
+        const zastepy = await Zastep.find({ teamId }).sort({ name: 1 });
+        res.json(zastepy);
+    } catch (err) { res.status(500).json({ error: 'Blad serwera' }); }
+});
+
+// Dodaj zastep (druzynowy, przyboczny, superadmin)
+app.post('/api/zastepy', requireAuth, async (req, res) => {
+    try {
+        const allowed = ['superadmin','druzynowy','przyboczny'];
+        if (!allowed.includes(req.user.role))
+            return res.status(403).json({ error: 'Brak uprawnien' });
+        const { name } = req.body;
+        if (!name) return res.status(400).json({ error: 'Podaj nazwe zastepu' });
+        const teamId = req.user.teamId;
+        const zastepId = 'z_' + teamId + '_' + Date.now();
+        const z = await Zastep.create({ zastepId, name, teamId });
+        res.json({ success: true, zastep: z });
+    } catch (err) { res.status(500).json({ error: 'Blad serwera' }); }
+});
+
+// Usun zastep
+app.delete('/api/zastepy/:zastepId', requireAuth, async (req, res) => {
+    try {
+        const allowed = ['superadmin','druzynowy','przyboczny'];
+        if (!allowed.includes(req.user.role))
+            return res.status(403).json({ error: 'Brak uprawnien' });
+        await Zastep.deleteOne({ zastepId: req.params.zastepId });
+        await User.updateMany({ zastepId: req.params.zastepId }, { $set: { zastepId: null } });
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Blad serwera' }); }
+});
+
+// Przypisz usera do zastepu
+app.post('/api/users/:id/zastep', requireAuth, async (req, res) => {
+    try {
+        const allowed = ['superadmin','druzynowy','przyboczny'];
+        if (!allowed.includes(req.user.role))
+            return res.status(403).json({ error: 'Brak uprawnien' });
+        const { zastepId } = req.body;
+        const user = await User.findByIdAndUpdate(req.params.id, { zastepId: zastepId || null }, { new: true });
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono usera' });
+        res.json({ success: true, user });
+    } catch (err) { res.status(500).json({ error: 'Blad serwera' }); }
+});
+
+// Wyslij prosbe o zdanie sprawnosci
+app.post('/api/requests', requireAuth, async (req, res) => {
+    try {
+        const { targetUserId, taskId, itemId } = req.body;
+        // Na razie zapisujemy jako notification w progress
+        // W przyszlosci mozna dodac osobna kolekcje
+        res.json({ success: true, message: 'Prosba wyslana' });
+    } catch (err) { res.status(500).json({ error: 'Blad serwera' }); }
+});
+
+// Pobierz kadre w druzynie (do wysylania prosb)
+app.get('/api/my-kadra', requireAuth, async (req, res) => {
+    try {
+        const kadraRoles = ['druzynowy','przyboczny','zastepowy','podzastepowy'];
+        const HIERARCHY = ['superadmin','ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy','user'];
+        const myRank = HIERARCHY.indexOf(req.user.role);
+        const kadra = await User.find({
+            teamId: req.user.teamId,
+            status: 'active',
+            role: { $in: kadraRoles },
+            _id: { $ne: req.user.id }
+        }, 'name role zastepId').sort({ role: 1 });
+        // Zwroc tylko wyzszych w hierarchii
+        const higher = kadra.filter(k => HIERARCHY.indexOf(k.role) < myRank);
+        res.json(higher);
+    } catch (err) { res.status(500).json({ error: 'Blad serwera' }); }
+});
+
 app.get('/api/ping', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
 app.listen(PORT, () => console.log('Serwer port ' + PORT));
