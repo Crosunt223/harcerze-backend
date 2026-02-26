@@ -177,11 +177,7 @@ app.post('/api/login', async (req, res) => {
         if (!user || !(await bcrypt.compare(password, user.passwordHash)))
             return res.status(401).json({ success: false, message: 'Bledny login lub haslo' });
 
-        if (user.status === 'pending')
-            return res.status(403).json({ success: false, message: 'Konto czeka na akceptacje druzynowego' });
-        if (user.status === 'rejected')
-            return res.status(403).json({ success: false, message: 'Konto zostalo odrzucone' });
-
+        // Pending i rejected mogą się zalogować - frontend pokaże odpowiedni ekran
         const token = jwt.sign(
             { id: user._id, username: user.username, role: user.role, teamId: user.teamId, name: user.name },
             JWT_SECRET,
@@ -190,7 +186,7 @@ app.post('/api/login', async (req, res) => {
 
         res.json({
             success: true, token,
-            user: { id: user._id, username: user.username, name: user.name, role: user.role, teamId: user.teamId }
+            user: { id: user._id, username: user.username, name: user.name, role: user.role, teamId: user.teamId, status: user.status }
         });
     } catch (err) {
         console.error(err);
@@ -380,12 +376,39 @@ app.get('/api/progress/:userId', requireAuth, async (req, res) => {
 app.post('/api/progress', requireAuth, requireAdmin, async (req, res) => {
     try {
         const { userId, taskId, status } = req.body;
-        if (req.user.role === 'admin') {
+        const HIERARCHY = ['superadmin','ksis','instruktor','druzynowy','zastepowy','podzastepowy','user'];
+        const myRank = HIERARCHY.indexOf(req.user.role);
+
+        // Superadmin moze wszystko
+        if (req.user.role !== 'superadmin') {
             const target = await User.findById(userId);
-            if (!target || target.teamId !== req.user.teamId)
-                return res.status(403).json({ error: 'Brak uprawnien' });
+            if (!target) return res.status(404).json({ error: 'Uzytkownik nie istnieje' });
+
+            // Sprawdz czy to wlasny progress
+            const isSelf = target._id.toString() === req.user.id.toString();
+
+            if (isSelf) {
+                // Kadra moze zapisywac wlasny progress
+                // (zastepowy, podzastepowy moga sobie zdawac - NIE, tylko user moze ogladac)
+                // Zgodnie z wymaganiem: zastepowy NIE moze sobie zdawac
+                const SELF_ALLOWED = ['ksis','instruktor','druzynowy'];
+                if (!SELF_ALLOWED.includes(req.user.role)) {
+                    return res.status(403).json({ error: 'Brak uprawnien do zapisu wlasnego progresu' });
+                }
+            } else {
+                // Sprawdz hierarchie - mozna zdawac tylko nizszym
+                const targetRank = HIERARCHY.indexOf(target.role);
+                if (myRank >= targetRank) {
+                    return res.status(403).json({ error: 'Mozna zdawac sprawnosci tylko osobom nizej w hierarchii' });
+                }
+                // Sprawdz ta sama druzyne (oprócz superadmina)
+                if (String(target.teamId) !== String(req.user.teamId)) {
+                    return res.status(403).json({ error: 'Brak uprawnien - inna druzyna' });
+                }
+            }
         }
-        const key = 'tasks.' + taskId;
+
+        const key = 'tasks.' + taskId.replace(/[.]/g, '_');
         const update = status ? { $set: { [key]: true } } : { $unset: { [key]: '' } };
         const p = await Progress.findOneAndUpdate({ userId }, update, { upsert: true, new: true });
         res.json({ success: true, progress: p.tasks });
