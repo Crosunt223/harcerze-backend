@@ -69,6 +69,12 @@ const requestSchema = new mongoose.Schema({
 }, { timestamps: true });
 const SprawRequest = mongoose.model('SprawRequest', requestSchema);
 
+const boardSchema = new mongoose.Schema({
+    userId: { type: String, required: true, unique: true },
+    slots:  { type: Array, default: Array(12).fill(null) }
+}, { timestamps: true });
+const Board = mongoose.model('Board', boardSchema);
+
 
 // ================================================================
 // SEED — domyslne druzyny + konto admin/admin
@@ -562,6 +568,38 @@ app.post('/api/requests/:id/respond', requireAuth, async (req, res) => {
                 { upsert: true, new: true }
             );
         }
+        res.json({ success: true });
+    } catch (err) { console.error(err); res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
+});
+
+
+// ── Tablica sprawnosci ──────────────────────────────
+app.get('/api/board/:userId', requireAuth, async (req, res) => {
+    try {
+        const board = await Board.findOne({ userId: req.params.userId });
+        const slots = board ? board.slots : Array(12).fill(null);
+        res.json(slots);
+    } catch (err) { res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
+});
+
+app.post('/api/board/:userId', requireAuth, async (req, res) => {
+    try {
+        const { position, slot } = req.body;
+        if (req.params.userId !== req.user.id.toString() && req.user.role !== 'superadmin')
+            return res.status(403).json({ error: 'Brak uprawnien' });
+        if (position < 0 || position > 11)
+            return res.status(400).json({ error: 'Nieprawidlowa pozycja' });
+
+        let board = await Board.findOne({ userId: req.params.userId });
+        if (!board) {
+            board = new Board({ userId: req.params.userId, slots: Array(12).fill(null) });
+        }
+        const slots = board.slots ? [...board.slots] : Array(12).fill(null);
+        while (slots.length < 12) slots.push(null);
+        slots[position] = slot || null;
+        board.slots = slots;
+        board.markModified('slots');
+        await board.save();
         res.json({ success: true });
     } catch (err) { console.error(err); res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
 });
