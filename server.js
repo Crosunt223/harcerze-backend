@@ -69,6 +69,19 @@ const requestSchema = new mongoose.Schema({
 }, { timestamps: true });
 const SprawRequest = mongoose.model('SprawRequest', requestSchema);
 
+
+const stopienSchema = new mongoose.Schema({
+    userId:      { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    stopienId:   { type: String, required: true },  // st_1 .. st_6
+    status:      { type: String, enum: ['open','closed'], default: 'open' },
+    openedBy:    { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    openedAt:    { type: Date },
+    closedBy:    { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    closedAt:    { type: Date },
+}, { timestamps: true });
+stopienSchema.index({ userId: 1, stopienId: 1 }, { unique: true });
+const StopienStatus = mongoose.model('StopienStatus', stopienSchema);
+
 const boardSchema = new mongoose.Schema({
     userId: { type: String, required: true, unique: true },
     slots:  { type: Array, default: Array(12).fill(null) }
@@ -404,7 +417,11 @@ app.get('/api/progress/:userId', requireAuth, async (req, res) => {
         if (req.user.role === 'user' && req.user.id.toString() !== req.params.userId)
             return res.status(403).json({ error: 'Brak uprawnien' });
         const p = await Progress.findOne({ userId: req.params.userId });
-        res.json(p ? p.tasks : {});
+        // Konwertuj na plain object (Mongoose Mixed moze zwrocic Map)
+        const tasks = p ? (p.tasks ? Object.fromEntries(
+            Object.entries(p.toObject().tasks || {})
+        ) : {}) : {};
+        res.json(tasks);
     } catch (err) {
         res.status(500).json({ error: 'Blad serwera' });
     }
@@ -559,14 +576,30 @@ app.post('/api/requests/:id/respond', requireAuth, async (req, res) => {
         request.status = action === 'approve' ? 'approved' : 'rejected';
         await request.save();
 
-        // Jesli zatwierdzone - zapisz progress
+        // Jesli zatwierdzone
         if (action === 'approve') {
-            const safeTaskId = request.taskId.replace(/[.]/g, '_');
-            await Progress.findOneAndUpdate(
-                { userId: request.fromUserId },
-                { $set: { ['tasks.' + safeTaskId]: true } },
-                { upsert: true, new: true }
-            );
+            if (request.taskId === 'stopien-zaliczenie') {
+                // Prośba o zaliczenie stopnia - otwórz stopień jeśli nie otwarty
+                const stopienId = request.itemId;
+                const existing = await StopienStatus.findOne({ userId: request.fromUserId, stopienId });
+                if (!existing) {
+                    await StopienStatus.create({
+                        userId:    request.fromUserId,
+                        stopienId,
+                        status:    'open',
+                        openedBy:  req.user.id,
+                        openedAt:  new Date(),
+                    });
+                }
+            } else {
+                // Zwykłe zadanie sprawności - zapisz progress
+                const safeTaskId = request.taskId.replace(/[.]/g, '_');
+                await Progress.findOneAndUpdate(
+                    { userId: request.fromUserId },
+                    { $set: { ['tasks.' + safeTaskId]: true } },
+                    { upsert: true, new: true }
+                );
+            }
         }
         res.json({ success: true });
     } catch (err) { console.error(err); res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
@@ -602,6 +635,82 @@ app.post('/api/board/:userId', requireAuth, async (req, res) => {
         await board.save();
         res.json({ success: true });
     } catch (err) { console.error(err); res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
+});
+
+
+// ── Stopnie ──────────────────────────────────────────────
+// Pobierz statusy stopni dla usera
+app.get('/api/stopnie/:userId', requireAuth, async (req, res) => {
+    try {
+        const statuses = await StopienStatus.find({ userId: req.params.userId });
+        res.json(statuses);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Otwórz stopień (druzynowy+)
+app.post('/api/stopnie/:userId/open', requireAuth, async (req, res) => {
+    try {
+        const { stopienId } = req.body;
+        const HIERARCHY = ['superadmin','ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy','user'];
+        const myRank     = HIERARCHY.indexOf(req.user.role);
+        const targetUser = await User.findById(req.params.userId);
+        if (!targetUser) return res.status(404).json({ error: 'Nie znaleziono użytkownika' });
+        const targetRank = HIERARCHY.indexOf(targetUser.role);
+
+        // Tylko druzynowy (rank<=3) lub wyżej może otwierać
+        if (myRank > 3 && req.user.role !== 'superadmin') {
+            return res.status(403).json({ error: 'Brak uprawnień — tylko drużynowy lub wyżej' });
+        }
+        // Nie można otwierać osobie równej lub wyżej w hierarchii (poza superadmin)
+        if (req.user.role !== 'superadmin' && myRank >= targetRank) {
+            return res.status(403).json({ error: 'Brak uprawnień' });
+        }
+
+        // Sprawdź czy poprzedni stopień jest zamknięty
+        const STOPNIE_ORDER = ['st_1','st_2','st_3','st_4','st_5','st_6'];
+        const idx = STOPNIE_ORDER.indexOf(stopienId);
+        if (idx > 0) {
+            const prevId = STOPNIE_ORDER[idx - 1];
+            const prev = await StopienStatus.findOne({ userId: req.params.userId, stopienId: prevId });
+            if (!prev || prev.status !== 'closed') {
+                return res.status(400).json({ error: 'Poprzedni stopień musi być zamknięty' });
+            }
+        }
+
+        // Sprawdź czy już otwarty/zamknięty
+        const existing = await StopienStatus.findOne({ userId: req.params.userId, stopienId });
+        if (existing) return res.status(400).json({ error: 'Stopień już jest otwarty lub zamknięty' });
+
+        const doc = await StopienStatus.create({
+            userId:    req.params.userId,
+            stopienId,
+            status:    'open',
+            openedBy:  req.user.id,
+            openedAt:  new Date(),
+        });
+        res.json(doc);
+    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// Zamknij stopień (druzynowy+)
+app.post('/api/stopnie/:userId/close', requireAuth, async (req, res) => {
+    try {
+        const { stopienId } = req.body;
+        const HIERARCHY = ['superadmin','ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy','user'];
+        const myRank     = HIERARCHY.indexOf(req.user.role);
+
+        if (myRank > 3 && req.user.role !== 'superadmin') {
+            return res.status(403).json({ error: 'Brak uprawnień' });
+        }
+
+        const doc = await StopienStatus.findOneAndUpdate(
+            { userId: req.params.userId, stopienId, status: 'open' },
+            { status: 'closed', closedBy: req.user.id, closedAt: new Date() },
+            { new: true }
+        );
+        if (!doc) return res.status(404).json({ error: 'Stopień nie jest otwarty' });
+        res.json(doc);
+    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/ping', (req, res) => res.json({ status: 'ok', time: new Date() }));
