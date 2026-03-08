@@ -617,20 +617,27 @@ app.get('/api/board/:userId', requireAuth, async (req, res) => {
 
 app.post('/api/board/:userId', requireAuth, async (req, res) => {
     try {
-        const { position, slot } = req.body;
-        if (req.params.userId !== req.user.id.toString() && req.user.role !== 'superadmin')
+        const userId = req.params.userId;
+        const isOwn = userId === req.user.id.toString();
+        const isAdmin = ['admin','druzynowy','przyboczny','superadmin'].includes(req.user.role);
+        if (!isOwn && !isAdmin)
             return res.status(403).json({ error: 'Brak uprawnien' });
-        if (position < 0 || position > 11)
-            return res.status(400).json({ error: 'Nieprawidlowa pozycja' });
 
-        let board = await Board.findOne({ userId: req.params.userId });
-        if (!board) {
-            board = new Board({ userId: req.params.userId, slots: Array(12).fill(null) });
+        let board = await Board.findOne({ userId });
+        if (!board) board = new Board({ userId, slots: Array(12).fill(null) });
+
+        // Obsługa obu formatów: { slots: [...] } lub { position, slot }
+        if (Array.isArray(req.body.slots)) {
+            board.slots = req.body.slots.slice(0, 12);
+        } else {
+            const { position, slot } = req.body;
+            if (position >= 0 && position <= 11) {
+                const slots = board.slots ? [...board.slots] : Array(12).fill(null);
+                while (slots.length < 12) slots.push(null);
+                slots[position] = slot || null;
+                board.slots = slots;
+            }
         }
-        const slots = board.slots ? [...board.slots] : Array(12).fill(null);
-        while (slots.length < 12) slots.push(null);
-        slots[position] = slot || null;
-        board.slots = slots;
         board.markModified('slots');
         await board.save();
         res.json({ success: true });
@@ -661,10 +668,8 @@ app.post('/api/stopnie/:userId/open', requireAuth, async (req, res) => {
         if (myRank > 3 && req.user.role !== 'superadmin') {
             return res.status(403).json({ error: 'Brak uprawnień — tylko drużynowy lub wyżej' });
         }
-        // Nie można otwierać osobie o wyższej lub równej randze (poza superadmin)
-        // Wyjątek: można otwierać samemu sobie (np. admin testuje)
-        const isSelf = req.user.id.toString() === req.params.userId.toString();
-        if (!isSelf && req.user.role !== 'superadmin' && myRank >= targetRank) {
+        // Nie można otwierać osobie równej lub wyżej w hierarchii (poza superadmin)
+        if (req.user.role !== 'superadmin' && myRank >= targetRank) {
             return res.status(403).json({ error: 'Brak uprawnień' });
         }
 
@@ -681,10 +686,7 @@ app.post('/api/stopnie/:userId/open', requireAuth, async (req, res) => {
 
         // Sprawdź czy już otwarty/zamknięty
         const existing = await StopienStatus.findOne({ userId: req.params.userId, stopienId });
-        if (existing) {
-            // Zwróć istniejący rekord zamiast błędu (idempotentne)
-            return res.json(existing);
-        }
+        if (existing) return res.status(400).json({ error: 'Stopień już jest otwarty lub zamknięty' });
 
         const doc = await StopienStatus.create({
             userId:    req.params.userId,
