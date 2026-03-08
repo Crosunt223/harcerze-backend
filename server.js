@@ -661,8 +661,10 @@ app.post('/api/stopnie/:userId/open', requireAuth, async (req, res) => {
         if (myRank > 3 && req.user.role !== 'superadmin') {
             return res.status(403).json({ error: 'Brak uprawnień — tylko drużynowy lub wyżej' });
         }
-        // Nie można otwierać osobie równej lub wyżej w hierarchii (poza superadmin)
-        if (req.user.role !== 'superadmin' && myRank >= targetRank) {
+        // Nie można otwierać osobie o wyższej lub równej randze (poza superadmin)
+        // Wyjątek: można otwierać samemu sobie (np. admin testuje)
+        const isSelf = req.user.id.toString() === req.params.userId.toString();
+        if (!isSelf && req.user.role !== 'superadmin' && myRank >= targetRank) {
             return res.status(403).json({ error: 'Brak uprawnień' });
         }
 
@@ -679,7 +681,10 @@ app.post('/api/stopnie/:userId/open', requireAuth, async (req, res) => {
 
         // Sprawdź czy już otwarty/zamknięty
         const existing = await StopienStatus.findOne({ userId: req.params.userId, stopienId });
-        if (existing) return res.status(400).json({ error: 'Stopień już jest otwarty lub zamknięty' });
+        if (existing) {
+            // Zwróć istniejący rekord zamiast błędu (idempotentne)
+            return res.json(existing);
+        }
 
         const doc = await StopienStatus.create({
             userId:    req.params.userId,
