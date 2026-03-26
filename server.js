@@ -740,7 +740,7 @@ app.get('/api/legendary', requireAuth, async (req, res) => {
 
 app.post('/api/legendary', requireAuth, async (req, res) => {
     try {
-        const allowed = ['superadmin','ksis','instruktor','druzynowy'];
+        const allowed = ['superadmin','ksis','druzynowy'];
         if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Brak uprawnien' });
         const { itemId, enabled, threshold } = req.body;
         if (!itemId) return res.status(400).json({ error: 'Brak itemId' });
@@ -765,7 +765,7 @@ app.get('/api/legendary-stats', requireAuth, async (req, res) => {
                 const hasAny = Object.keys(tasks).some(k => k.startsWith(leg.itemId + '-') && tasks[k]);
                 if (hasAny) owners++;
             }
-            return { itemId: leg.itemId, threshold: leg.threshold, owners, active: owners >= leg.threshold };
+            return { itemId: leg.itemId, threshold: leg.threshold, owners, active: owners >= 1 };
         });
         res.json(stats);
     } catch(e) { res.status(500).json({ error: e.message }); }
