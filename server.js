@@ -219,7 +219,7 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ success: false, message: 'Bledny login lub haslo' });
 
         const token = jwt.sign(
-            { id: user._id, username: user.username, role: user.role, teamId: user.teamId, zastepId: user.zastepId, name: user.name },
+            { id: user._id, username: user.username, role: user.role, teamId: user.teamId, name: user.name },
             JWT_SECRET,
             { expiresIn: '7d' }
         );
@@ -527,15 +527,6 @@ app.post('/api/users/:id/zastep', requireAuth, async (req, res) => {
     } catch (err) { console.error(err); res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
 });
 
-// Mój zastęp — zwraca zastepId i zastepName zalogowanego usera
-app.get('/api/my-zastep', requireAuth, async (req, res) => {
-    try {
-        if (!req.user.zastepId) return res.json({ zastepId: null, zastepName: null });
-        const z = await Zastep.findOne({ zastepId: req.user.zastepId });
-        res.json({ zastepId: req.user.zastepId, zastepName: z ? z.name : null });
-    } catch (err) { res.status(500).json({ error: 'Blad serwera' }); }
-});
-
 app.get('/api/my-kadra', requireAuth, async (req, res) => {
     try {
         const myRank = HIERARCHY.indexOf(req.user.role);
@@ -543,7 +534,7 @@ app.get('/api/my-kadra', requireAuth, async (req, res) => {
             teamId: req.user.teamId,
             status: 'active',
             _id: { $ne: req.user.id }
-        }, 'name role zastepId teamId');
+        }, 'name role zastepId');
         const higher = kadra.filter(k => HIERARCHY.indexOf(k.role) < myRank);
         res.json(higher);
     } catch (err) { console.error(err); res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
@@ -727,6 +718,57 @@ app.post('/api/stopnie/:userId/close', requireAuth, async (req, res) => {
         if (!doc) return res.status(404).json({ error: 'Stopień nie jest otwarty' });
         res.json(doc);
     } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// ================================================================
+// LEGENDARNE SPRAWNOSCI
+// ================================================================
+
+const legendarySchema = new mongoose.Schema({
+    itemId:    { type: String, required: true, unique: true },
+    enabled:   { type: Boolean, default: false },
+    threshold: { type: Number, default: 10 },
+}, { timestamps: true });
+const LegendarySpraw = mongoose.model('LegendarySpraw', legendarySchema);
+
+app.get('/api/legendary', requireAuth, async (req, res) => {
+    try {
+        const items = await LegendarySpraw.find({});
+        res.json(items);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/legendary', requireAuth, async (req, res) => {
+    try {
+        const allowed = ['superadmin','ksis','instruktor','druzynowy'];
+        if (!allowed.includes(req.user.role)) return res.status(403).json({ error: 'Brak uprawnien' });
+        const { itemId, enabled, threshold } = req.body;
+        if (!itemId) return res.status(400).json({ error: 'Brak itemId' });
+        const doc = await LegendarySpraw.findOneAndUpdate(
+            { itemId },
+            { enabled: !!enabled, threshold: threshold || 10 },
+            { upsert: true, new: true }
+        );
+        res.json(doc);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/legendary-stats', requireAuth, async (req, res) => {
+    try {
+        const legendary = await LegendarySpraw.find({ enabled: true });
+        if (!legendary.length) return res.json([]);
+        const allProgress = await Progress.find({});
+        const stats = legendary.map(function(leg) {
+            let owners = 0;
+            for (const p of allProgress) {
+                const tasks = p.tasks || {};
+                const hasAny = Object.keys(tasks).some(k => k.startsWith(leg.itemId + '-') && tasks[k]);
+                if (hasAny) owners++;
+            }
+            return { itemId: leg.itemId, threshold: leg.threshold, owners, active: owners >= leg.threshold };
+        });
+        res.json(stats);
+    } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/ping', (req, res) => res.json({ status: 'ok', time: new Date() }));
