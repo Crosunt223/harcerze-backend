@@ -219,7 +219,7 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ success: false, message: 'Bledny login lub haslo' });
 
         const token = jwt.sign(
-            { id: user._id, username: user.username, role: user.role, teamId: user.teamId, name: user.name },
+            { id: user._id, username: user.username, role: user.role, teamId: user.teamId, zastepId: user.zastepId, name: user.name },
             JWT_SECRET,
             { expiresIn: '7d' }
         );
@@ -527,6 +527,15 @@ app.post('/api/users/:id/zastep', requireAuth, async (req, res) => {
     } catch (err) { console.error(err); res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
 });
 
+// Mój zastęp — zwraca zastepId i zastepName zalogowanego usera
+app.get('/api/my-zastep', requireAuth, async (req, res) => {
+    try {
+        if (!req.user.zastepId) return res.json({ zastepId: null, zastepName: null });
+        const z = await Zastep.findOne({ zastepId: req.user.zastepId });
+        res.json({ zastepId: req.user.zastepId, zastepName: z ? z.name : null });
+    } catch (err) { res.status(500).json({ error: 'Blad serwera' }); }
+});
+
 app.get('/api/my-kadra', requireAuth, async (req, res) => {
     try {
         const myRank = HIERARCHY.indexOf(req.user.role);
@@ -534,7 +543,7 @@ app.get('/api/my-kadra', requireAuth, async (req, res) => {
             teamId: req.user.teamId,
             status: 'active',
             _id: { $ne: req.user.id }
-        }, 'name role zastepId');
+        }, 'name role zastepId teamId');
         const higher = kadra.filter(k => HIERARCHY.indexOf(k.role) < myRank);
         res.json(higher);
     } catch (err) { console.error(err); res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
