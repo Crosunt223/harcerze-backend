@@ -771,6 +771,117 @@ app.get('/api/legendary-stats', requireAuth, async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ================================================================
+// EDYCJA SPRAWNOSCI (tylko superadmin)
+// ================================================================
+
+const customSprawSchema = new mongoose.Schema({
+    itemId:     { type: String, required: true, unique: true },
+    title:      { type: String },
+    category:   { type: String },
+    isNew:      { type: Boolean, default: false }, // true = nowa sprawnosc stworzona przez admina
+    groups:     { type: Array, default: [] },       // pelne grupy zadan dla nowych sprawnosci
+    extraTasks: { type: Array, default: [] },       // dodatkowe zadania do istniejacych
+    images:     { type: Array, default: [] },
+    circleVariants: { type: Number, default: 0 },
+    disabled:   { type: Boolean, default: false }
+}, { timestamps: true });
+const CustomSpraw = mongoose.model('CustomSpraw', customSprawSchema);
+
+// Pobierz wszystkie customizacje
+app.get('/api/custom-spraw', requireAuth, async (req, res) => {
+    try {
+        const items = await CustomSpraw.find({});
+        res.json(items);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Zapisz customizację lub nową sprawnosc
+app.post('/api/custom-spraw', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Tylko superadmin' });
+        const { itemId, title, category, isNew, groups, extraTasks, images, circleVariants, disabled } = req.body;
+        if (!itemId) return res.status(400).json({ error: 'Brak itemId' });
+        const doc = await CustomSpraw.findOneAndUpdate(
+            { itemId },
+            { title, category, isNew: !!isNew, groups: groups || [], extraTasks: extraTasks || [], images: images || [], circleVariants: circleVariants || 0, disabled: !!disabled },
+            { upsert: true, new: true }
+        );
+        res.json(doc);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Usun customizacje / nowa sprawnosc
+app.delete('/api/custom-spraw/:itemId', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Tylko superadmin' });
+        await CustomSpraw.deleteOne({ itemId: req.params.itemId });
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ================================================================
+// PRYWATNE SPRAWNOSCI
+// ================================================================
+
+const privateSprawSchema = new mongoose.Schema({
+    itemId:    { type: String, required: true, unique: true },
+    title:     { type: String, required: true },
+    category:  { type: String, default: 'Prywatne' },
+    groups:    { type: Array, default: [] },
+    images:    { type: Array, default: [] },
+    allowedUsers: { type: Array, default: [] }, // tablica userId (string)
+}, { timestamps: true });
+const PrivateSpraw = mongoose.model('PrivateSpraw', privateSprawSchema);
+
+// Pobierz prywatne sprawnosci dostepne dla mnie
+app.get('/api/private-spraw', requireAuth, async (req, res) => {
+    try {
+        const userId = req.user.id.toString();
+        let items;
+        if (req.user.role === 'superadmin') {
+            items = await PrivateSpraw.find({});
+        } else {
+            items = await PrivateSpraw.find({ allowedUsers: userId });
+        }
+        res.json(items);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Pobierz wszystkie prywatne (tylko superadmin — do zarządzania)
+app.get('/api/private-spraw/all', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Tylko superadmin' });
+        const items = await PrivateSpraw.find({});
+        res.json(items);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Stwórz / zaktualizuj prywatną sprawnosc
+app.post('/api/private-spraw', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Tylko superadmin' });
+        const { itemId, title, category, groups, images, allowedUsers } = req.body;
+        if (!title) return res.status(400).json({ error: 'Brak tytulu' });
+        const id = itemId || ('priv_' + Date.now().toString(36));
+        const doc = await PrivateSpraw.findOneAndUpdate(
+            { itemId: id },
+            { title, category: category || 'Prywatne', groups: groups || [], images: images || [], allowedUsers: allowedUsers || [] },
+            { upsert: true, new: true }
+        );
+        res.json(doc);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Usun prywatną sprawnosc
+app.delete('/api/private-spraw/:itemId', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Tylko superadmin' });
+        await PrivateSpraw.deleteOne({ itemId: req.params.itemId });
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/ping', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
 app.listen(PORT, () => console.log('Serwer port ' + PORT));
