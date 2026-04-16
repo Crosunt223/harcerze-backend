@@ -882,6 +882,65 @@ app.delete('/api/private-spraw/:itemId', requireAuth, async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ================================================================
+// ZGLOSZENIA BLEDOW
+// ================================================================
+
+const bugReportSchema = new mongoose.Schema({
+    fromUserId:   { type: String, required: true },
+    fromUserName: { type: String, required: true },
+    fromRole:     { type: String },
+    description:  { type: String, required: true },
+    screenshot:   { type: String, default: null }, // base64 lub URL
+    status:       { type: String, enum: ['new','read','resolved'], default: 'new' },
+}, { timestamps: true });
+const BugReport = mongoose.model('BugReport', bugReportSchema);
+
+// Wyslij zgloszenie
+app.post('/api/bug-report', requireAuth, async (req, res) => {
+    try {
+        const { description, screenshot } = req.body;
+        if (!description) return res.status(400).json({ error: 'Podaj opis bledu' });
+        const doc = await BugReport.create({
+            fromUserId:   req.user.id,
+            fromUserName: req.user.name,
+            fromRole:     req.user.role,
+            description,
+            screenshot: screenshot || null,
+        });
+        res.json({ success: true, id: doc._id });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Pobierz wszystkie zgloszenia (tylko superadmin)
+app.get('/api/bug-reports', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Brak uprawnien' });
+        const docs = await BugReport.find({}).sort({ createdAt: -1 });
+        res.json(docs);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Zmien status (tylko superadmin)
+app.post('/api/bug-reports/:id/status', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Brak uprawnien' });
+        const { status } = req.body;
+        const doc = await BugReport.findByIdAndUpdate(req.params.id, { status }, { new: true });
+        if (!doc) return res.status(404).json({ error: 'Nie znaleziono' });
+        res.json(doc);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Usun zgloszenie (tylko superadmin)
+app.delete('/api/bug-reports/:id', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Brak uprawnien' });
+        await BugReport.findByIdAndDelete(req.params.id);
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/ping', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
 app.listen(PORT, () => console.log('Serwer port ' + PORT));
