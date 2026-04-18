@@ -722,6 +722,90 @@ app.post('/api/stopnie/:userId/close', requireAuth, async (req, res) => {
 
 
 // ================================================================
+// LEGENDARNE SPRAWNOSCI
+// ================================================================
+const legendarySchema = new mongoose.Schema({
+    itemId:    { type: String, required: true, unique: true },
+    enabled:   { type: Boolean, default: false },
+    threshold: { type: Number, default: 10 },
+}, { timestamps: true });
+const LegendarySpraw = mongoose.model('LegendarySpraw', legendarySchema);
+
+app.get('/api/legendary', requireAuth, async (req, res) => {
+    try { res.json(await LegendarySpraw.find({})); } catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/legendary', requireAuth, async (req, res) => {
+    try {
+        if (!['superadmin'].includes(req.user.role)) return res.status(403).json({ error: 'Tylko superadmin' });
+        const { itemId, enabled, threshold } = req.body;
+        const doc = await LegendarySpraw.findOneAndUpdate({ itemId }, { enabled: !!enabled, threshold: threshold||10 }, { upsert: true, new: true });
+        res.json(doc);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/legendary-stats', requireAuth, async (req, res) => {
+    try {
+        const legendary = await LegendarySpraw.find({ enabled: true });
+        if (!legendary.length) return res.json([]);
+        const allProgress = await Progress.find({});
+        const stats = legendary.map(function(leg) {
+            let owners = 0;
+            for (const p of allProgress) {
+                const tasks = p.tasks || {};
+                if (Object.keys(tasks).some(k => k.startsWith(leg.itemId + '-') && tasks[k])) owners++;
+            }
+            return { itemId: leg.itemId, threshold: leg.threshold, owners, active: owners >= 1 };
+        });
+        res.json(stats);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ================================================================
+// PRYWATNE SPRAWNOSCI
+// ================================================================
+const privateSprawSchema = new mongoose.Schema({
+    itemId:       { type: String, required: true, unique: true },
+    title:        { type: String, required: true },
+    category:     { type: String, default: 'Prywatne' },
+    groups:       { type: Array, default: [] },
+    images:       { type: Array, default: [] },
+    allowedUsers: { type: Array, default: [] },
+}, { timestamps: true });
+const PrivateSpraw = mongoose.model('PrivateSpraw', privateSprawSchema);
+
+app.get('/api/private-spraw', requireAuth, async (req, res) => {
+    try {
+        const uid = req.user.id.toString();
+        const items = req.user.role === 'superadmin'
+            ? await PrivateSpraw.find({})
+            : await PrivateSpraw.find({ allowedUsers: uid });
+        res.json(items);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/private-spraw/all', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Tylko superadmin' });
+        res.json(await PrivateSpraw.find({}));
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/private-spraw', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Tylko superadmin' });
+        const { itemId, title, category, groups, images, allowedUsers } = req.body;
+        if (!title) return res.status(400).json({ error: 'Brak tytulu' });
+        const id = itemId || ('priv_' + Date.now().toString(36));
+        const doc = await PrivateSpraw.findOneAndUpdate({ itemId: id }, { title, category: category||'Prywatne', groups: groups||[], images: images||[], allowedUsers: allowedUsers||[] }, { upsert: true, new: true });
+        res.json(doc);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/private-spraw/:itemId', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Tylko superadmin' });
+        await PrivateSpraw.deleteOne({ itemId: req.params.itemId });
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ================================================================
 // ZGLOSZENIA BLEDOW
 // ================================================================
 const bugReportSchema = new mongoose.Schema({
@@ -742,15 +826,12 @@ app.post('/api/bug-report', requireAuth, async (req, res) => {
         res.json({ success: true, id: doc._id });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.get('/api/bug-reports', requireAuth, async (req, res) => {
     try {
         if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Brak uprawnien' });
-        const docs = await BugReport.find({}).sort({ createdAt: -1 });
-        res.json(docs);
+        res.json(await BugReport.find({}).sort({ createdAt: -1 }));
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/bug-reports/:id/status', requireAuth, async (req, res) => {
     try {
         if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Brak uprawnien' });
@@ -759,7 +840,6 @@ app.post('/api/bug-reports/:id/status', requireAuth, async (req, res) => {
         res.json(doc);
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.delete('/api/bug-reports/:id', requireAuth, async (req, res) => {
     try {
         if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Brak uprawnien' });
