@@ -158,6 +158,13 @@ function requireAdmin(req, res, next) {
     next();
 }
 
+// Middleware: tylko druzynowy i wyżej (NIE ksis) może zarządzać drużyną
+function requireDruzynowy(req, res, next) {
+    if (!['superadmin','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy'].includes(req.user.role))
+        return res.status(403).json({ error: 'Brak uprawnien do zarzadzania druzyna' });
+    next();
+}
+
 function requireSuperAdmin(req, res, next) {
     if (req.user.role !== 'superadmin')
         return res.status(403).json({ error: 'Tylko super-admin' });
@@ -263,6 +270,24 @@ app.post('/api/teams', requireAuth, requireSuperAdmin, async (req, res) => {
     }
 });
 
+// Zmien nazwe druzyny (tylko superadmin)
+app.patch('/api/teams/:teamId', requireAuth, requireSuperAdmin, async (req, res) => {
+    try {
+        const { name } = req.body;
+        if (!name || name.trim().length < 2)
+            return res.status(400).json({ success: false, message: 'Podaj nową nazwę drużyny' });
+        const team = await Team.findOneAndUpdate(
+            { teamId: req.params.teamId },
+            { name: name.trim() },
+            { new: true }
+        );
+        if (!team) return res.status(404).json({ error: 'Druzyna nie istnieje' });
+        res.json({ success: true, team });
+    } catch (err) {
+        res.status(500).json({ error: 'Blad serwera' });
+    }
+});
+
 // Usun druzyne (tylko superadmin) — usuwa tez wszystkich czlonkow i ich postepy
 app.delete('/api/teams/:teamId', requireAuth, requireSuperAdmin, async (req, res) => {
     try {
@@ -309,7 +334,7 @@ app.get('/api/team-members', requireAuth, requireAdmin, async (req, res) => {
 });
 
 // Akceptuj konto
-app.post('/api/users/:id/approve', requireAuth, requireAdmin, async (req, res) => {
+app.post('/api/users/:id/approve', requireAuth, requireDruzynowy, async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
         if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
@@ -324,7 +349,7 @@ app.post('/api/users/:id/approve', requireAuth, requireAdmin, async (req, res) =
 });
 
 // Odrzuc konto
-app.post('/api/users/:id/reject', requireAuth, requireAdmin, async (req, res) => {
+app.post('/api/users/:id/reject', requireAuth, requireDruzynowy, async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
         if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
@@ -339,7 +364,7 @@ app.post('/api/users/:id/reject', requireAuth, requireAdmin, async (req, res) =>
 });
 
 // Usun konto (admin: tylko swoja druzyna, superadmin: wszystkich)
-app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
+app.delete('/api/users/:id', requireAuth, requireDruzynowy, async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
         if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
@@ -362,7 +387,7 @@ app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
 // Body: { newRole }
 // Zasada: mozesz nadac tylko role NIZSZE od swojej wlasnej
 //         nie mozesz zmieniac roli osob rownych lub wyzszych od siebie
-app.post('/api/users/:id/promote', requireAuth, async (req, res) => {
+app.post('/api/users/:id/promote', requireAuth, requireDruzynowy, async (req, res) => {
     try {
         const { newRole } = req.body;
         if (!newRole) return res.status(400).json({ error: 'Podaj nowa role' });
@@ -515,7 +540,7 @@ app.delete('/api/zastepy/:zastepId', requireAuth, async (req, res) => {
     } catch (err) { console.error(err); res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
 });
 
-app.post('/api/users/:id/zastep', requireAuth, async (req, res) => {
+app.post('/api/users/:id/zastep', requireAuth, requireDruzynowy, async (req, res) => {
     try {
         const allowed = ['superadmin','druzynowy','przyboczny'];
         if (!allowed.includes(req.user.role))
@@ -530,12 +555,26 @@ app.post('/api/users/:id/zastep', requireAuth, async (req, res) => {
 app.get('/api/my-kadra', requireAuth, async (req, res) => {
     try {
         const myRank = HIERARCHY.indexOf(req.user.role);
+        // Pobierz kadrę z tej samej drużyny wyższą rangą
         const kadra = await User.find({
             teamId: req.user.teamId,
             status: 'active',
             _id: { $ne: req.user.id }
         }, 'name role zastepId');
         const higher = kadra.filter(k => HIERARCHY.indexOf(k.role) < myRank);
+
+        // Dodatkowo zawsze dołącz aktywnych ksis (mogą być w innej drużynie lub bez)
+        const ksisList = await User.find({
+            role: 'ksis',
+            status: 'active',
+            _id: { $ne: req.user.id }
+        }, 'name role zastepId');
+        // Scal, unikając duplikatów
+        const ids = new Set(higher.map(u => u._id.toString()));
+        for (const k of ksisList) {
+            if (!ids.has(k._id.toString())) higher.push(k);
+        }
+
         res.json(higher);
     } catch (err) { console.error(err); res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
 });
