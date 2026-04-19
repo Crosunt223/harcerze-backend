@@ -761,6 +761,60 @@ app.post('/api/stopnie/:userId/close', requireAuth, async (req, res) => {
 
 
 // ================================================================
+// LEGENDARNE SPRAWNOSCI
+// ================================================================
+
+const legendarySchema = new mongoose.Schema({
+    itemId:    { type: String, required: true, unique: true },
+    enabled:   { type: Boolean, default: false },
+    threshold: { type: Number, default: 10 },
+}, { timestamps: true });
+const Legendary = mongoose.model('Legendary', legendarySchema);
+
+// Pobierz wszystkie ustawienia legendarnych
+app.get('/api/legendary', requireAuth, async (req, res) => {
+    try {
+        const items = await Legendary.find({});
+        res.json(items);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Ustaw / zaktualizuj legendarną sprawność (tylko superadmin)
+app.post('/api/legendary', requireAuth, requireSuperAdmin, async (req, res) => {
+    try {
+        const { itemId, enabled, threshold } = req.body;
+        if (!itemId) return res.status(400).json({ error: 'Podaj itemId' });
+        const doc = await Legendary.findOneAndUpdate(
+            { itemId },
+            { enabled: !!enabled, threshold: threshold != null ? Number(threshold) : 10 },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true, doc });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Statystyki — ile osob ma dana sprawnosc
+app.get('/api/legendary-stats', requireAuth, async (req, res) => {
+    try {
+        const legendItems = await Legendary.find({ enabled: true });
+        if (!legendItems.length) return res.json([]);
+
+        const allProgress = await Progress.find({});
+        const stats = legendItems.map(function(leg) {
+            const safePrefix = leg.itemId.replace(/[.]/g, '_');
+            let owners = 0;
+            for (const p of allProgress) {
+                const tasks = p.toObject().tasks || {};
+                const hasSome = Object.keys(tasks).some(k => k.startsWith(safePrefix) && tasks[k]);
+                if (hasSome) owners++;
+            }
+            return { itemId: leg.itemId, enabled: leg.enabled, threshold: leg.threshold, owners };
+        });
+        res.json(stats);
+    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// ================================================================
 // ZGLOSZENIA BLEDOW
 // ================================================================
 const bugReportSchema = new mongoose.Schema({
