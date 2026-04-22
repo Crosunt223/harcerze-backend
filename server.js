@@ -4,9 +4,62 @@ const bodyParser = require('body-parser');
 const mongoose   = require('mongoose');
 const bcrypt     = require('bcryptjs');
 const jwt        = require('jsonwebtoken');
+const crypto     = require('crypto');
+
+// ── Email (nodemailer) ───────────────────────────────────────────
+let transporter = null;
+let nodemailerOk = false;
+try {
+    const nodemailer = require('nodemailer');
+    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        transporter = nodemailer.createTransport({
+            host:   process.env.SMTP_HOST   || 'smtp.gmail.com',
+            port:   parseInt(process.env.SMTP_PORT || '587'),
+            secure: false,
+            auth: {
+                user: process.env.SMTP_USER,
+                pass: process.env.SMTP_PASS,
+            }
+        });
+        nodemailerOk = true;
+        console.log('SMTP skonfigurowany:', process.env.SMTP_USER);
+    } else {
+        console.log('SMTP: brak SMTP_USER/SMTP_PASS — email zapisywany bez weryfikacji');
+    }
+} catch(e) { console.warn('nodemailer niedostepny:', e.message); }
+
+async function sendMail(to, subject, html) {
+    if (!nodemailerOk || !transporter) {
+        console.log('[MAIL DISABLED] To:', to, '| Subject:', subject);
+        return false;
+    }
+    try {
+        await transporter.sendMail({
+            from: '"Ksiazeczka Harcerska" <' + process.env.SMTP_USER + '>',
+            to, subject, html
+        });
+        console.log('[MAIL SENT] To:', to);
+        return true;
+    } catch(e) { 
+        console.error('Blad wysylki maila:', e.message); 
+        return false; 
+    }
+}
+
+// Czy SMTP jest gotowe
+function smtpReady() { return nodemailerOk && !!transporter; }
 
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin: [
+        'https://crosunt223.github.io',
+        'http://localhost:3000',
+        'http://localhost:5500',
+        'http://127.0.0.1:5500',
+        'http://localhost:8080'
+    ],
+    credentials: true
+}));
 app.use(bodyParser.json());
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/harcerze';
@@ -34,10 +87,17 @@ const userSchema = new mongoose.Schema({
     username:     { type: String, required: true, unique: true, lowercase: true, trim: true },
     passwordHash: { type: String, required: true },
     name:         { type: String, required: true },
+    email:        { type: String, default: null, lowercase: true, trim: true },
     role:         { type: String, enum: ['superadmin','ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy','user'], default: 'user' },
     teamId:       { type: String, default: null },
     zastepId:     { type: String, default: null },
-    status:       { type: String, enum: ['active','pending','rejected'], default: 'pending' }
+    status:       { type: String, enum: ['active','pending','rejected'], default: 'pending' },
+    // Tokeny do weryfikacji emaila i resetu hasła
+    emailToken:      { type: String, default: null },
+    emailTokenExp:   { type: Date,   default: null },
+    pendingEmail:    { type: String, default: null }, // nowy email czekający na potwierdzenie
+    resetToken:      { type: String, default: null },
+    resetTokenExp:   { type: Date,   default: null },
 }, { timestamps: true });
 
 const progressSchema = new mongoose.Schema({
@@ -861,6 +921,149 @@ app.delete('/api/bug-reports/:id', requireAuth, async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/ping', (req, res) => res.json({ status: 'ok', time: new Date() }));
+
+// ================================================================
+// KONTO — EMAIL / HASŁO
+// ================================================================
+
+// Pobierz swoje dane konta (email)
+app.get('/api/me', requireAuth, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.id, 'username name email role teamId status');
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
+        res.json({ username: user.username, name: user.name, email: user.email || null });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Zmień email — wysyła link potwierdzający na NOWY adres
+app.post('/api/me/change-email', requireAuth, async (req, res) => {
+    try {
+        const { newEmail, password } = req.body;
+        if (!newEmail || !password) return res.status(400).json({ error: 'Podaj nowy email i haslo' });
+        const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRe.test(newEmail)) return res.status(400).json({ error: 'Nieprawidlowy format emaila' });
+
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
+        if (!(await bcrypt.compare(password, user.passwordHash)))
+            return res.status(401).json({ error: 'Bledne haslo' });
+
+        // Sprawdz czy email zajety
+        const existing = await User.findOne({ email: newEmail.toLowerCase().trim(), _id: { $ne: user._id } });
+        if (existing) return res.status(400).json({ error: 'Ten email jest juz zajety' });
+
+        if (smtpReady()) {
+            // SMTP skonfigurowane — wyslij link potwierdzajacy, email zapisze sie po kliknieciu
+            const token = crypto.randomBytes(32).toString('hex');
+            user.emailToken    = token;
+            user.emailTokenExp = new Date(Date.now() + 24 * 60 * 60 * 1000);
+            user.pendingEmail  = newEmail.toLowerCase().trim();
+            await user.save();
+
+            const link = (process.env.FRONTEND_URL || 'https://crosunt223.github.io') + '?confirmEmail=' + token;
+            await sendMail(
+                newEmail,
+                'Potwierdz nowy email — Ksiazeczka Harcerska',
+                '<p>Czuwaj, <strong>' + user.name + '</strong>!</p>'
+                + '<p>Kliknij ponizszy link aby potwierdzic nowy email:</p>'
+                + '<p><a href="' + link + '" style="background:#2e7d32;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Potwierdz email</a></p>'
+                + '<p style="color:#888;font-size:12px">Link wazny 24 godziny.</p>'
+            );
+            res.json({ success: true, confirmed: false, message: 'Link potwierdzajacy wyslany na ' + newEmail + '. Kliknij go aby zapisac email.' });
+        } else {
+            // SMTP nie skonfigurowane — zapisz email od razu
+            user.email = newEmail.toLowerCase().trim();
+            user.emailToken = null; user.emailTokenExp = null; user.pendingEmail = null;
+            await user.save();
+            res.json({ success: true, confirmed: true, message: '✓ Email zapisany: ' + user.email });
+        }
+    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// Potwierdz zmiane emaila (klik w link)
+app.get('/api/confirm-email', async (req, res) => {
+    try {
+        const { token } = req.query;
+        if (!token) return res.status(400).json({ error: 'Brak tokenu' });
+        const user = await User.findOne({ emailToken: token, emailTokenExp: { $gt: new Date() } });
+        if (!user) return res.status(400).json({ error: 'Token nieprawidlowy lub wygas' });
+        user.email         = user.pendingEmail;
+        user.emailToken    = null;
+        user.emailTokenExp = null;
+        user.pendingEmail  = null;
+        await user.save();
+        res.json({ success: true, message: 'Email zostal zmieniony na ' + user.email });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Zmień hasło (zalogowany użytkownik)
+app.post('/api/me/change-password', requireAuth, async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+        if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Podaj obecne i nowe haslo' });
+        if (newPassword.length < 6) return res.status(400).json({ error: 'Nowe haslo min. 6 znakow' });
+
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
+        if (!(await bcrypt.compare(currentPassword, user.passwordHash)))
+            return res.status(401).json({ error: 'Obecne haslo jest nieprawidlowe' });
+
+        user.passwordHash = await bcrypt.hash(newPassword, 10);
+        await user.save();
+        res.json({ success: true, message: 'Haslo zostalo zmienione' });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Reset hasła — krok 1: wyślij link na email
+app.post('/api/reset-password', async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ error: 'Podaj adres email' });
+        const user = await User.findOne({ email: email.toLowerCase().trim() });
+        // Zawsze zwracaj sukces (nie ujawniaj czy email istnieje)
+        if (!user) return res.json({ success: true, message: 'Jesli email istnieje, link zostal wyslany' });
+
+        const token = crypto.randomBytes(32).toString('hex');
+        user.resetToken    = token;
+        user.resetTokenExp = new Date(Date.now() + 60 * 60 * 1000); // 1h
+        await user.save();
+
+        const link = (process.env.FRONTEND_URL || 'https://crosunt223.github.io') + '?resetToken=' + token;
+        await sendMail(
+            user.email,
+            'Reset hasla — Ksiazeczka Harcerska',
+            '<p>Czuwaj, <strong>' + user.name + '</strong>!</p>'
+            + '<p>Otrzymalismy prosbe o reset hasla. Kliknij link:</p>'
+            + '<p><a href="' + link + '" style="background:#2e7d32;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Resetuj haslo</a></p>'
+            + '<p style="color:#888;font-size:12px">Link wazny 1 godzine. Jesli nie prosiłes o reset, zignoruj tę wiadomosc.</p>'
+        );
+        res.json({ success: true, message: 'Jesli email istnieje, link zostal wyslany' });
+    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// Reset hasła — krok 2: ustaw nowe hasło przez token
+app.post('/api/reset-password/confirm', async (req, res) => {
+    try {
+        const { token, newPassword } = req.body;
+        if (!token || !newPassword) return res.status(400).json({ error: 'Brak danych' });
+        if (newPassword.length < 6) return res.status(400).json({ error: 'Haslo min. 6 znakow' });
+
+        const user = await User.findOne({ resetToken: token, resetTokenExp: { $gt: new Date() } });
+        if (!user) return res.status(400).json({ error: 'Link nieprawidlowy lub wygas. Zamow nowy.' });
+
+        user.passwordHash  = await bcrypt.hash(newPassword, 10);
+        user.resetToken    = null;
+        user.resetTokenExp = null;
+        await user.save();
+        res.json({ success: true, message: 'Haslo zostalo zmienione. Mozesz sie zalogowac.' });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/ping', (req, res) => res.json({ 
+    status: 'ok', 
+    time: new Date(),
+    smtp: smtpReady() ? 'configured' : 'disabled',
+    smtpUser: process.env.SMTP_USER ? process.env.SMTP_USER.replace(/(.{3}).*(@.*)/, '$1***$2') : null
+}));
 
 app.listen(PORT, () => console.log('Serwer port ' + PORT));
