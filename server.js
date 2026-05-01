@@ -4,63 +4,9 @@ const bodyParser = require('body-parser');
 const mongoose   = require('mongoose');
 const bcrypt     = require('bcryptjs');
 const jwt        = require('jsonwebtoken');
-const crypto     = require('crypto');
-
-// ── Email (nodemailer) ───────────────────────────────────────────
-let transporter = null;
-let nodemailerOk = false;
-try {
-    const nodemailer = require('nodemailer');
-    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-        transporter = nodemailer.createTransport({
-            host:   process.env.SMTP_HOST   || 'smtp.gmail.com',
-            port:   parseInt(process.env.SMTP_PORT || '587'),
-            secure: false,
-            auth: {
-                user: process.env.SMTP_USER,
-                pass: process.env.SMTP_PASS,
-            }
-        });
-        nodemailerOk = true;
-        console.log('SMTP skonfigurowany:', process.env.SMTP_USER);
-    } else {
-        console.log('SMTP: brak SMTP_USER/SMTP_PASS — email zapisywany bez weryfikacji');
-    }
-} catch(e) { console.warn('nodemailer niedostepny:', e.message); }
-
-async function sendMail(to, subject, html) {
-    if (!nodemailerOk || !transporter) {
-        console.log('[MAIL DISABLED] To:', to, '| Subject:', subject);
-        return false;
-    }
-    try {
-        await transporter.sendMail({
-            from: '"Ksiazeczka Harcerska" <' + process.env.SMTP_USER + '>',
-            to, subject, html
-        });
-        console.log('[MAIL SENT] To:', to);
-        return true;
-    } catch(e) { 
-        console.error('Blad wysylki maila:', e.message); 
-        return false; 
-    }
-}
-
-// Czy SMTP jest gotowe
-function smtpReady() { return nodemailerOk && !!transporter; }
 
 const app = express();
-app.use(cors({
-    origin: [
-        'https://crosunt223.github.io',
-        'https://ksisapp.netlify.app',
-        'http://localhost:3000',
-        'http://localhost:5500',
-        'http://127.0.0.1:5500',
-        'http://localhost:8080'
-    ],
-    credentials: true
-}));
+app.use(cors());
 app.use(bodyParser.json());
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/harcerze';
@@ -88,17 +34,11 @@ const userSchema = new mongoose.Schema({
     username:     { type: String, required: true, unique: true, lowercase: true, trim: true },
     passwordHash: { type: String, required: true },
     name:         { type: String, required: true },
-    email:        { type: String, default: null, lowercase: true, trim: true },
+    email:        { type: String, default: null },
     role:         { type: String, enum: ['superadmin','ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy','user'], default: 'user' },
     teamId:       { type: String, default: null },
     zastepId:     { type: String, default: null },
-    status:       { type: String, enum: ['active','pending','rejected'], default: 'pending' },
-    // Tokeny do weryfikacji emaila i resetu hasła
-    emailToken:      { type: String, default: null },
-    emailTokenExp:   { type: Date,   default: null },
-    pendingEmail:    { type: String, default: null }, // nowy email czekający na potwierdzenie
-    resetToken:      { type: String, default: null },
-    resetTokenExp:   { type: Date,   default: null },
+    status:       { type: String, enum: ['active','pending','rejected'], default: 'pending' }
 }, { timestamps: true });
 
 const progressSchema = new mongoose.Schema({
@@ -219,13 +159,6 @@ function requireAdmin(req, res, next) {
     next();
 }
 
-// Middleware: tylko druzynowy i wyżej (NIE ksis) może zarządzać drużyną
-function requireDruzynowy(req, res, next) {
-    if (!['superadmin','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy'].includes(req.user.role))
-        return res.status(403).json({ error: 'Brak uprawnien do zarzadzania druzyna' });
-    next();
-}
-
 function requireSuperAdmin(req, res, next) {
     if (req.user.role !== 'superadmin')
         return res.status(403).json({ error: 'Tylko super-admin' });
@@ -261,7 +194,8 @@ app.post('/api/register', async (req, res) => {
         await User.create({
             username: username.toLowerCase().trim(),
             passwordHash: await bcrypt.hash(password, 10),
-            name: name.trim(), role, teamId, status
+            name: name.trim(), role, teamId, status,
+            email: (req.body.email || '').trim() || null
         });
 
         const msg = role === 'admin'
@@ -331,24 +265,6 @@ app.post('/api/teams', requireAuth, requireSuperAdmin, async (req, res) => {
     }
 });
 
-// Zmien nazwe druzyny (tylko superadmin)
-app.patch('/api/teams/:teamId', requireAuth, requireSuperAdmin, async (req, res) => {
-    try {
-        const { name } = req.body;
-        if (!name || name.trim().length < 2)
-            return res.status(400).json({ success: false, message: 'Podaj nową nazwę drużyny' });
-        const team = await Team.findOneAndUpdate(
-            { teamId: req.params.teamId },
-            { name: name.trim() },
-            { new: true }
-        );
-        if (!team) return res.status(404).json({ error: 'Druzyna nie istnieje' });
-        res.json({ success: true, team });
-    } catch (err) {
-        res.status(500).json({ error: 'Blad serwera' });
-    }
-});
-
 // Usun druzyne (tylko superadmin) — usuwa tez wszystkich czlonkow i ich postepy
 app.delete('/api/teams/:teamId', requireAuth, requireSuperAdmin, async (req, res) => {
     try {
@@ -395,7 +311,7 @@ app.get('/api/team-members', requireAuth, requireAdmin, async (req, res) => {
 });
 
 // Akceptuj konto
-app.post('/api/users/:id/approve', requireAuth, requireDruzynowy, async (req, res) => {
+app.post('/api/users/:id/approve', requireAuth, requireAdmin, async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
         if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
@@ -410,7 +326,7 @@ app.post('/api/users/:id/approve', requireAuth, requireDruzynowy, async (req, re
 });
 
 // Odrzuc konto
-app.post('/api/users/:id/reject', requireAuth, requireDruzynowy, async (req, res) => {
+app.post('/api/users/:id/reject', requireAuth, requireAdmin, async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
         if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
@@ -425,7 +341,7 @@ app.post('/api/users/:id/reject', requireAuth, requireDruzynowy, async (req, res
 });
 
 // Usun konto (admin: tylko swoja druzyna, superadmin: wszystkich)
-app.delete('/api/users/:id', requireAuth, requireDruzynowy, async (req, res) => {
+app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
         if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
@@ -448,7 +364,7 @@ app.delete('/api/users/:id', requireAuth, requireDruzynowy, async (req, res) => 
 // Body: { newRole }
 // Zasada: mozesz nadac tylko role NIZSZE od swojej wlasnej
 //         nie mozesz zmieniac roli osob rownych lub wyzszych od siebie
-app.post('/api/users/:id/promote', requireAuth, requireDruzynowy, async (req, res) => {
+app.post('/api/users/:id/promote', requireAuth, async (req, res) => {
     try {
         const { newRole } = req.body;
         if (!newRole) return res.status(400).json({ error: 'Podaj nowa role' });
@@ -601,7 +517,7 @@ app.delete('/api/zastepy/:zastepId', requireAuth, async (req, res) => {
     } catch (err) { console.error(err); res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
 });
 
-app.post('/api/users/:id/zastep', requireAuth, requireDruzynowy, async (req, res) => {
+app.post('/api/users/:id/zastep', requireAuth, async (req, res) => {
     try {
         const allowed = ['superadmin','druzynowy','przyboczny'];
         if (!allowed.includes(req.user.role))
@@ -616,26 +532,12 @@ app.post('/api/users/:id/zastep', requireAuth, requireDruzynowy, async (req, res
 app.get('/api/my-kadra', requireAuth, async (req, res) => {
     try {
         const myRank = HIERARCHY.indexOf(req.user.role);
-        // Pobierz kadrę z tej samej drużyny wyższą rangą
         const kadra = await User.find({
             teamId: req.user.teamId,
             status: 'active',
             _id: { $ne: req.user.id }
         }, 'name role zastepId');
         const higher = kadra.filter(k => HIERARCHY.indexOf(k.role) < myRank);
-
-        // Dodatkowo zawsze dołącz aktywnych ksis (mogą być w innej drużynie lub bez)
-        const ksisList = await User.find({
-            role: 'ksis',
-            status: 'active',
-            _id: { $ne: req.user.id }
-        }, 'name role zastepId');
-        // Scal, unikając duplikatów
-        const ids = new Set(higher.map(u => u._id.toString()));
-        for (const k of ksisList) {
-            if (!ids.has(k._id.toString())) higher.push(k);
-        }
-
         res.json(higher);
     } catch (err) { console.error(err); res.status(500).json({ error: 'Blad serwera: ' + err.message }); }
 });
@@ -824,55 +726,85 @@ app.post('/api/stopnie/:userId/close', requireAuth, async (req, res) => {
 // ================================================================
 // LEGENDARNE SPRAWNOSCI
 // ================================================================
-
 const legendarySchema = new mongoose.Schema({
     itemId:    { type: String, required: true, unique: true },
     enabled:   { type: Boolean, default: false },
     threshold: { type: Number, default: 10 },
 }, { timestamps: true });
-const Legendary = mongoose.model('Legendary', legendarySchema);
+const LegendarySpraw = mongoose.model('LegendarySpraw', legendarySchema);
 
-// Pobierz wszystkie ustawienia legendarnych
 app.get('/api/legendary', requireAuth, async (req, res) => {
+    try { res.json(await LegendarySpraw.find({})); } catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/legendary', requireAuth, async (req, res) => {
     try {
-        const items = await Legendary.find({});
+        if (!['superadmin'].includes(req.user.role)) return res.status(403).json({ error: 'Tylko superadmin' });
+        const { itemId, enabled, threshold } = req.body;
+        const doc = await LegendarySpraw.findOneAndUpdate({ itemId }, { enabled: !!enabled, threshold: threshold||10 }, { upsert: true, new: true });
+        res.json(doc);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/legendary-stats', requireAuth, async (req, res) => {
+    try {
+        const legendary = await LegendarySpraw.find({ enabled: true });
+        if (!legendary.length) return res.json([]);
+        const allProgress = await Progress.find({});
+        const stats = legendary.map(function(leg) {
+            let owners = 0;
+            for (const p of allProgress) {
+                const tasks = p.tasks || {};
+                if (Object.keys(tasks).some(k => k.startsWith(leg.itemId + '-') && tasks[k])) owners++;
+            }
+            return { itemId: leg.itemId, threshold: leg.threshold, owners, active: owners >= 1 };
+        });
+        res.json(stats);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ================================================================
+// PRYWATNE SPRAWNOSCI
+// ================================================================
+const privateSprawSchema = new mongoose.Schema({
+    itemId:       { type: String, required: true, unique: true },
+    title:        { type: String, required: true },
+    category:     { type: String, default: 'Prywatne' },
+    groups:       { type: Array, default: [] },
+    images:       { type: Array, default: [] },
+    allowedUsers: { type: Array, default: [] },
+}, { timestamps: true });
+const PrivateSpraw = mongoose.model('PrivateSpraw', privateSprawSchema);
+
+app.get('/api/private-spraw', requireAuth, async (req, res) => {
+    try {
+        const uid = req.user.id.toString();
+        const items = req.user.role === 'superadmin'
+            ? await PrivateSpraw.find({})
+            : await PrivateSpraw.find({ allowedUsers: uid });
         res.json(items);
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
-// Ustaw / zaktualizuj legendarną sprawność (tylko superadmin)
-app.post('/api/legendary', requireAuth, requireSuperAdmin, async (req, res) => {
+app.get('/api/private-spraw/all', requireAuth, async (req, res) => {
     try {
-        const { itemId, enabled, threshold } = req.body;
-        if (!itemId) return res.status(400).json({ error: 'Podaj itemId' });
-        const doc = await Legendary.findOneAndUpdate(
-            { itemId },
-            { enabled: !!enabled, threshold: threshold != null ? Number(threshold) : 10 },
-            { upsert: true, new: true }
-        );
-        res.json({ success: true, doc });
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Tylko superadmin' });
+        res.json(await PrivateSpraw.find({}));
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
-// Statystyki — ile osob ma dana sprawnosc
-app.get('/api/legendary-stats', requireAuth, async (req, res) => {
+app.post('/api/private-spraw', requireAuth, async (req, res) => {
     try {
-        const legendItems = await Legendary.find({ enabled: true });
-        if (!legendItems.length) return res.json([]);
-
-        const allProgress = await Progress.find({});
-        const stats = legendItems.map(function(leg) {
-            const safePrefix = leg.itemId.replace(/[.]/g, '_');
-            let owners = 0;
-            for (const p of allProgress) {
-                const tasks = p.toObject().tasks || {};
-                const hasSome = Object.keys(tasks).some(k => k.startsWith(safePrefix) && tasks[k]);
-                if (hasSome) owners++;
-            }
-            return { itemId: leg.itemId, enabled: leg.enabled, threshold: leg.threshold, owners };
-        });
-        res.json(stats);
-    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Tylko superadmin' });
+        const { itemId, title, category, groups, images, allowedUsers } = req.body;
+        if (!title) return res.status(400).json({ error: 'Brak tytulu' });
+        const id = itemId || ('priv_' + Date.now().toString(36));
+        const doc = await PrivateSpraw.findOneAndUpdate({ itemId: id }, { title, category: category||'Prywatne', groups: groups||[], images: images||[], allowedUsers: allowedUsers||[] }, { upsert: true, new: true });
+        res.json(doc);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/private-spraw/:itemId', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Tylko superadmin' });
+        await PrivateSpraw.deleteOne({ itemId: req.params.itemId });
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ================================================================
@@ -896,15 +828,12 @@ app.post('/api/bug-report', requireAuth, async (req, res) => {
         res.json({ success: true, id: doc._id });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.get('/api/bug-reports', requireAuth, async (req, res) => {
     try {
         if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Brak uprawnien' });
-        const docs = await BugReport.find({}).sort({ createdAt: -1 });
-        res.json(docs);
+        res.json(await BugReport.find({}).sort({ createdAt: -1 }));
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/bug-reports/:id/status', requireAuth, async (req, res) => {
     try {
         if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Brak uprawnien' });
@@ -913,7 +842,6 @@ app.post('/api/bug-reports/:id/status', requireAuth, async (req, res) => {
         res.json(doc);
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.delete('/api/bug-reports/:id', requireAuth, async (req, res) => {
     try {
         if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Brak uprawnien' });
@@ -923,148 +851,25 @@ app.delete('/api/bug-reports/:id', requireAuth, async (req, res) => {
 });
 
 
-// ================================================================
-// KONTO — EMAIL / HASŁO
-// ================================================================
-
-// Pobierz swoje dane konta (email)
-app.get('/api/me', requireAuth, async (req, res) => {
+// Usun konto
+app.post('/api/delete-account', requireAuth, async (req, res) => {
     try {
-        const user = await User.findById(req.user.id, 'username name email role teamId status');
-        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
-        res.json({ username: user.username, name: user.name, email: user.email || null });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// Zmień email — wysyła link potwierdzający na NOWY adres
-app.post('/api/me/change-email', requireAuth, async (req, res) => {
-    try {
-        const { newEmail, password } = req.body;
-        if (!newEmail || !password) return res.status(400).json({ error: 'Podaj nowy email i haslo' });
-        const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRe.test(newEmail)) return res.status(400).json({ error: 'Nieprawidlowy format emaila' });
-
+        const { password } = req.body;
+        if (!password) return res.status(400).json({ error: 'Podaj haslo' });
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
-        if (!(await bcrypt.compare(password, user.passwordHash)))
-            return res.status(401).json({ error: 'Bledne haslo' });
-
-        // Sprawdz czy email zajety
-        const existing = await User.findOne({ email: newEmail.toLowerCase().trim(), _id: { $ne: user._id } });
-        if (existing) return res.status(400).json({ error: 'Ten email jest juz zajety' });
-
-        if (smtpReady()) {
-            // SMTP skonfigurowane — wyslij link potwierdzajacy, email zapisze sie po kliknieciu
-            const token = crypto.randomBytes(32).toString('hex');
-            user.emailToken    = token;
-            user.emailTokenExp = new Date(Date.now() + 24 * 60 * 60 * 1000);
-            user.pendingEmail  = newEmail.toLowerCase().trim();
-            await user.save();
-
-            const link = (process.env.FRONTEND_URL || 'https://crosunt223.github.io') + '?confirmEmail=' + token;
-            await sendMail(
-                newEmail,
-                'Potwierdz nowy email — Ksiazeczka Harcerska',
-                '<p>Czuwaj, <strong>' + user.name + '</strong>!</p>'
-                + '<p>Kliknij ponizszy link aby potwierdzic nowy email:</p>'
-                + '<p><a href="' + link + '" style="background:#2e7d32;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Potwierdz email</a></p>'
-                + '<p style="color:#888;font-size:12px">Link wazny 24 godziny.</p>'
-            );
-            res.json({ success: true, confirmed: false, message: 'Link potwierdzajacy wyslany na ' + newEmail + '. Kliknij go aby zapisac email.' });
-        } else {
-            // SMTP nie skonfigurowane — zapisz email od razu
-            user.email = newEmail.toLowerCase().trim();
-            user.emailToken = null; user.emailTokenExp = null; user.pendingEmail = null;
-            await user.save();
-            res.json({ success: true, confirmed: true, message: '✓ Email zapisany: ' + user.email });
-        }
-    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
-});
-
-// Potwierdz zmiane emaila (klik w link)
-app.get('/api/confirm-email', async (req, res) => {
-    try {
-        const { token } = req.query;
-        if (!token) return res.status(400).json({ error: 'Brak tokenu' });
-        const user = await User.findOne({ emailToken: token, emailTokenExp: { $gt: new Date() } });
-        if (!user) return res.status(400).json({ error: 'Token nieprawidlowy lub wygas' });
-        user.email         = user.pendingEmail;
-        user.emailToken    = null;
-        user.emailTokenExp = null;
-        user.pendingEmail  = null;
-        await user.save();
-        res.json({ success: true, message: 'Email zostal zmieniony na ' + user.email });
+        const ok = await bcrypt.compare(password, user.passwordHash);
+        if (!ok) return res.status(403).json({ error: 'Nieprawidlowe haslo' });
+        // Usun postep, board, zgloszenia
+        await Progress.deleteMany({ userId: req.user.id });
+        await Board.deleteMany({ userId: req.user.id });
+        await StopienStatus.deleteMany({ userId: req.user.id });
+        await SprawRequest.deleteMany({ $or: [{ fromUserId: req.user.id }, { toUserId: req.user.id }] });
+        await user.deleteOne();
+        res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Zmień hasło (zalogowany użytkownik)
-app.post('/api/me/change-password', requireAuth, async (req, res) => {
-    try {
-        const { currentPassword, newPassword } = req.body;
-        if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Podaj obecne i nowe haslo' });
-        if (newPassword.length < 6) return res.status(400).json({ error: 'Nowe haslo min. 6 znakow' });
-
-        const user = await User.findById(req.user.id);
-        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
-        if (!(await bcrypt.compare(currentPassword, user.passwordHash)))
-            return res.status(401).json({ error: 'Obecne haslo jest nieprawidlowe' });
-
-        user.passwordHash = await bcrypt.hash(newPassword, 10);
-        await user.save();
-        res.json({ success: true, message: 'Haslo zostalo zmienione' });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// Reset hasła — krok 1: wyślij link na email
-app.post('/api/reset-password', async (req, res) => {
-    try {
-        const { email } = req.body;
-        if (!email) return res.status(400).json({ error: 'Podaj adres email' });
-        const user = await User.findOne({ email: email.toLowerCase().trim() });
-        // Zawsze zwracaj sukces (nie ujawniaj czy email istnieje)
-        if (!user) return res.json({ success: true, message: 'Jesli email istnieje, link zostal wyslany' });
-
-        const token = crypto.randomBytes(32).toString('hex');
-        user.resetToken    = token;
-        user.resetTokenExp = new Date(Date.now() + 60 * 60 * 1000); // 1h
-        await user.save();
-
-        const link = (process.env.FRONTEND_URL || 'https://crosunt223.github.io') + '?resetToken=' + token;
-        await sendMail(
-            user.email,
-            'Reset hasla — Ksiazeczka Harcerska',
-            '<p>Czuwaj, <strong>' + user.name + '</strong>!</p>'
-            + '<p>Otrzymalismy prosbe o reset hasla. Kliknij link:</p>'
-            + '<p><a href="' + link + '" style="background:#2e7d32;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Resetuj haslo</a></p>'
-            + '<p style="color:#888;font-size:12px">Link wazny 1 godzine. Jesli nie prosiłes o reset, zignoruj tę wiadomosc.</p>'
-        );
-        res.json({ success: true, message: 'Jesli email istnieje, link zostal wyslany' });
-    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
-});
-
-// Reset hasła — krok 2: ustaw nowe hasło przez token
-app.post('/api/reset-password/confirm', async (req, res) => {
-    try {
-        const { token, newPassword } = req.body;
-        if (!token || !newPassword) return res.status(400).json({ error: 'Brak danych' });
-        if (newPassword.length < 6) return res.status(400).json({ error: 'Haslo min. 6 znakow' });
-
-        const user = await User.findOne({ resetToken: token, resetTokenExp: { $gt: new Date() } });
-        if (!user) return res.status(400).json({ error: 'Link nieprawidlowy lub wygas. Zamow nowy.' });
-
-        user.passwordHash  = await bcrypt.hash(newPassword, 10);
-        user.resetToken    = null;
-        user.resetTokenExp = null;
-        await user.save();
-        res.json({ success: true, message: 'Haslo zostalo zmienione. Mozesz sie zalogowac.' });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/ping', (req, res) => res.json({ 
-    status: 'ok', 
-    time: new Date(),
-    smtp: smtpReady() ? 'configured' : 'disabled',
-    smtpUser: process.env.SMTP_USER ? process.env.SMTP_USER.replace(/(.{3}).*(@.*)/, '$1***$2') : null
-}));
+app.get('/api/ping', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
 app.listen(PORT, () => console.log('Serwer port ' + PORT));
