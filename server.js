@@ -870,6 +870,14 @@ app.post('/api/delete-account', requireAuth, async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+app.get('/api/my-zastep', requireAuth, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.id, 'zastepId');
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
+        res.json({ zastepId: user.zastepId || null });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/ping', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
 app.listen(PORT, () => console.log('Serwer port ' + PORT));
