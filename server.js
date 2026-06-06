@@ -4,6 +4,27 @@ const bodyParser = require('body-parser');
 const mongoose   = require('mongoose');
 const bcrypt     = require('bcryptjs');
 const jwt        = require('jsonwebtoken');
+const crypto     = require('crypto');
+
+// NODEMAILER
+let transporter = null;
+try {
+    const nodemailer = require('nodemailer');
+    if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+        transporter = nodemailer.createTransport({
+            host:   process.env.SMTP_HOST,
+            port:   parseInt(process.env.SMTP_PORT || '587'),
+            secure: process.env.SMTP_SECURE === 'true',
+            auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+        });
+        console.log('SMTP OK:', process.env.SMTP_HOST);
+    }
+} catch(e) { console.log('Nodemailer niedostepny'); }
+const APP_URL = process.env.FRONTEND_URL || process.env.APP_URL || 'http://localhost:3000';
+async function sendEmail(to, subject, html) {
+    if (transporter) { await transporter.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, html }); }
+    else { console.log('EMAIL (brak SMTP) do:', to, '| Temat:', subject); }
+}
 
 const app = express();
 app.use(cors());
@@ -43,7 +64,8 @@ const userSchema = new mongoose.Schema({
 
 const progressSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true, ref: 'User' },
-    tasks:  { type: mongoose.Schema.Types.Mixed, default: {} }
+    tasks:  { type: mongoose.Schema.Types.Mixed, default: {} },
+    dates:  { type: mongoose.Schema.Types.Mixed, default: {} }
 }, { timestamps: true });
 
 const Team     = mongoose.model('Team',     teamSchema);
@@ -219,6 +241,12 @@ app.post('/api/login', async (req, res) => {
         const user = await User.findOne({ username: username.toLowerCase().trim() });
         if (!user || !(await bcrypt.compare(password, user.passwordHash)))
             return res.status(401).json({ success: false, message: 'Bledny login lub haslo' });
+        if (user.status === 'pending')
+            return res.status(403).json({ success: false, message: 'Konto czeka na akceptację drużynowego.' });
+        if (user.status === 'rejected')
+            return res.status(403).json({ success: false, message: 'Konto zostało odrzucone. Skontaktuj się z drużynowym.' });
+        if (user.status !== 'active')
+            return res.status(403).json({ success: false, message: 'Konto nieaktywne.' });
 
         const token = jwt.sign(
             { id: user._id, username: user.username, role: user.role, teamId: user.teamId, name: user.name },
@@ -419,11 +447,20 @@ app.get('/api/progress/:userId', requireAuth, async (req, res) => {
         if (req.user.role === 'user' && req.user.id.toString() !== req.params.userId)
             return res.status(403).json({ error: 'Brak uprawnien' });
         const p = await Progress.findOne({ userId: req.params.userId });
-        // Konwertuj na plain object (Mongoose Mixed moze zwrocic Map)
-        const tasks = p ? (p.tasks ? Object.fromEntries(
-            Object.entries(p.toObject().tasks || {})
-        ) : {}) : {};
+        const tasks = p ? Object.fromEntries(Object.entries(p.toObject().tasks || {})) : {};
         res.json(tasks);
+    } catch (err) {
+        res.status(500).json({ error: 'Blad serwera' });
+    }
+});
+
+app.get('/api/progress/:userId/dates', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role === 'user' && req.user.id.toString() !== req.params.userId)
+            return res.status(403).json({ error: 'Brak uprawnien' });
+        const p = await Progress.findOne({ userId: req.params.userId });
+        const dates = p ? Object.fromEntries(Object.entries(p.toObject().dates || {})) : {};
+        res.json(dates);
     } catch (err) {
         res.status(500).json({ error: 'Blad serwera' });
     }
@@ -456,7 +493,13 @@ app.post('/api/progress', requireAuth, requireAdmin, async (req, res) => {
 
         const safeTaskId = taskId.replace(/[.]/g, '_');
         const key = 'tasks.' + safeTaskId;
-        const update = status ? { $set: { [key]: true } } : { $unset: { [key]: '' } };
+        const dateKey = 'dates.' + safeTaskId;
+        let update;
+        if (status) {
+            update = { $set: { [key]: true, [dateKey]: new Date().toISOString() } };
+        } else {
+            update = { $unset: { [key]: '', [dateKey]: '' } };
+        }
         const p = await Progress.findOneAndUpdate({ userId }, update, { upsert: true, new: true });
         res.json({ success: true, progress: p.tasks });
     } catch (err) {
@@ -881,3 +924,93 @@ app.get('/api/my-zastep', requireAuth, async (req, res) => {
 app.get('/api/ping', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
 app.listen(PORT, () => console.log('Serwer port ' + PORT));
+// ================================================================
+// /api/me — dane zalogowanego użytkownika
+// ================================================================
+app.get('/api/me', requireAuth, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.id, '-passwordHash');
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
+        res.json({ id: user._id, username: user.username, name: user.name, email: user.email || '', role: user.role, teamId: user.teamId, zastepId: user.zastepId, status: user.status });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ================================================================
+// /api/me/change-password — zmiana hasła
+// ================================================================
+app.post('/api/me/change-password', requireAuth, async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+        if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Podaj oba hasla' });
+        if (newPassword.length < 6) return res.status(400).json({ error: 'Nowe haslo min. 6 znakow' });
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
+        if (!(await bcrypt.compare(currentPassword, user.passwordHash)))
+            return res.status(403).json({ error: 'Obecne haslo jest nieprawidlowe' });
+        user.passwordHash = await bcrypt.hash(newPassword, 10);
+        await user.save();
+        res.json({ success: true, message: 'Haslo zmienione pomyslnie' });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ================================================================
+// /api/me/change-email — zmiana emaila
+// ================================================================
+app.post('/api/me/change-email', requireAuth, async (req, res) => {
+    try {
+        const { newEmail, password } = req.body;
+        if (!newEmail || !password) return res.status(400).json({ error: 'Podaj email i haslo' });
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) return res.status(400).json({ error: 'Nieprawidlowy email' });
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
+        if (!(await bcrypt.compare(password, user.passwordHash)))
+            return res.status(403).json({ error: 'Nieprawidlowe haslo' });
+        const exists = await User.findOne({ email: newEmail.toLowerCase().trim(), _id: { $ne: user._id } });
+        if (exists) return res.status(400).json({ error: 'Ten email jest juz zajety' });
+        user.email = newEmail.toLowerCase().trim();
+        await user.save();
+        res.json({ success: true, message: 'Email zaktualizowany' });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ================================================================
+// Reset hasła — wyslij link
+// ================================================================
+const tokenStore = new Map(); // userId -> { token, expires }
+
+app.post('/api/reset-password', async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ error: 'Podaj email' });
+        const user = await User.findOne({ email: email.toLowerCase().trim() });
+        if (user) {
+            const token = crypto.randomBytes(32).toString('hex');
+            tokenStore.set(token, { userId: user._id.toString(), expires: Date.now() + 60*60*1000 });
+            const link = APP_URL + '/?resetToken=' + token;
+            await sendEmail(user.email,
+                'Reset hasła — Ksiazeczka Harcerska',
+                '<p>Kliknij link aby ustawic nowe haslo (wazny 1h):</p>'
+                + '<p><a href="'+link+'" style="background:#3a6b1e;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Resetuj haslo</a></p>'
+                + '<p style="color:#888;font-size:12px">Jesli to nie Ty — zignoruj te wiadomosc.</p>'
+            );
+            console.log('Reset link dla', email, ':', link);
+        }
+        res.json({ success: true, message: 'Jesli konto istnieje, wysłaliśmy link na podany email.' });
+    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/reset-password/confirm', async (req, res) => {
+    try {
+        const { token, newPassword } = req.body;
+        if (!token || !newPassword) return res.status(400).json({ error: 'Brak danych' });
+        if (newPassword.length < 6) return res.status(400).json({ error: 'Haslo min. 6 znakow' });
+        const entry = tokenStore.get(token);
+        if (!entry || entry.expires < Date.now()) return res.status(400).json({ error: 'Token wygasl lub jest nieprawidlowy' });
+        const user = await User.findById(entry.userId);
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono uzytkownika' });
+        user.passwordHash = await bcrypt.hash(newPassword, 10);
+        await user.save();
+        tokenStore.delete(token);
+        res.json({ success: true, message: 'Haslo zmienione. Mozesz sie zalogowac.' });
+    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
