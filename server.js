@@ -987,16 +987,22 @@ app.post('/api/reset-password', async (req, res) => {
             const token = crypto.randomBytes(32).toString('hex');
             tokenStore.set(token, { userId: user._id.toString(), expires: Date.now() + 60*60*1000 });
             const link = APP_URL + '/?resetToken=' + token;
-            await sendEmail(user.email,
-                'Reset hasła — Ksiazeczka Harcerska',
-                '<p>Kliknij link aby ustawic nowe haslo (wazny 1h):</p>'
-                + '<p><a href="'+link+'" style="background:#3a6b1e;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Resetuj haslo</a></p>'
-                + '<p style="color:#888;font-size:12px">Jesli to nie Ty — zignoruj te wiadomosc.</p>'
-            );
-            console.log('Reset link dla', email, ':', link);
+            console.log('=== RESET LINK dla', email, '===\n' + link + '\n===');
+            try {
+                await sendEmail(user.email,
+                    'Reset hasla — Ksiazeczka Harcerska',
+                    '<p>Kliknij link aby ustawic nowe haslo (wazny 1h):</p>'
+                    + '<p><a href="' + link + '" style="background:#3a6b1e;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Resetuj haslo</a></p>'
+                    + '<p style="color:#888;font-size:12px">Jesli to nie Ty - zignoruj te wiadomosc.</p>'
+                );
+            } catch(mailErr) {
+                console.error('Blad wysylania emaila reset:', mailErr.message);
+                // Nie przerywaj — token jest zapisany, link zalogowany do konsoli
+            }
         }
-        res.json({ success: true, message: 'Jesli konto istnieje, wysłaliśmy link na podany email.' });
-    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+        // Zawsze zwracaj sukces (nie ujawniaj czy email istnieje)
+        res.json({ success: true, message: 'Jesli konto istnieje, wyslalismy link na podany email.' });
+    } catch(e) { console.error('reset-password error:', e); res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/reset-password/confirm', async (req, res) => {
