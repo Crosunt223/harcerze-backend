@@ -59,7 +59,7 @@ const userSchema = new mongoose.Schema({
     role:         { type: String, enum: ['superadmin','ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy','user'], default: 'user' },
     teamId:       { type: String, default: null },
     zastepId:     { type: String, default: null },
-    status:       { type: String, enum: ['active','pending','rejected'], default: 'pending' }
+    status:       { type: String, enum: ['active','pending','rejected','unverified'], default: 'pending' }
 }, { timestamps: true });
 
 const progressSchema = new mongoose.Schema({
@@ -111,6 +111,13 @@ const boardSchema = new mongoose.Schema({
 }, { timestamps: true });
 const Board = mongoose.model('Board', boardSchema);
 
+const resetTokenSchema = new mongoose.Schema({
+    userId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    token:     { type: String, required: true, unique: true },
+    expiresAt: { type: Date, required: true, index: { expires: 0 } }
+}, { timestamps: true });
+const ResetToken = mongoose.model('ResetToken', resetTokenSchema);
+
 
 // ================================================================
 // SEED — domyslne druzyny + konto admin/admin
@@ -131,19 +138,14 @@ async function seedData() {
     }
     console.log('Druzyny OK');
 
-    // Super-admin — login: admin, haslo: admin
-    const exists = await User.findOne({ username: 'admin' });
-    if (!exists) {
-        await User.create({
-            username:     'admin',
-            passwordHash: await bcrypt.hash('admin', 10),
-            name:         'Super Admin',
-            role:         'superadmin',
-            teamId:       null,
-            status:       'active'
-        });
-        console.log('Super-admin utworzony  login:admin  haslo:admin');
-    }
+    // Super-admin — zawsze aktualizuj haslo i status
+    const adminHash = await bcrypt.hash('admin', 10);
+    await User.findOneAndUpdate(
+        { username: 'admin' },
+        { $set: { username:'admin', passwordHash:adminHash, name:'Super Admin', role:'superadmin', teamId:null, status:'active', email: null } },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    console.log('Super-admin OK  login:admin  haslo:admin');
 }
 
 // ================================================================
@@ -976,31 +978,31 @@ app.post('/api/me/change-email', requireAuth, async (req, res) => {
 // ================================================================
 // Reset hasła — wyslij link
 // ================================================================
-const tokenStore = new Map(); // userId -> { token, expires }
-
+// Reset hasla — MongoDB (trwale miedzy restartami)
 app.post('/api/reset-password', async (req, res) => {
     try {
         const { email } = req.body;
         if (!email) return res.status(400).json({ error: 'Podaj email' });
         const user = await User.findOne({ email: email.toLowerCase().trim() });
         if (user) {
+            await ResetToken.deleteMany({ userId: user._id });
             const token = crypto.randomBytes(32).toString('hex');
-            tokenStore.set(token, { userId: user._id.toString(), expires: Date.now() + 60*60*1000 });
+            await ResetToken.create({ userId: user._id, token, expiresAt: new Date(Date.now() + 60*60*1000) });
             const link = APP_URL + '/?resetToken=' + token;
-            console.log('=== RESET LINK dla', email, '===\n' + link + '\n===');
+            console.log('=== RESET LINK ==='); console.log(link); console.log('==================');
             try {
                 await sendEmail(user.email,
                     'Reset hasla — Ksiazeczka Harcerska',
-                    '<p>Kliknij link aby ustawic nowe haslo (wazny 1h):</p>'
-                    + '<p><a href="' + link + '" style="background:#3a6b1e;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">Resetuj haslo</a></p>'
-                    + '<p style="color:#888;font-size:12px">Jesli to nie Ty - zignoruj te wiadomosc.</p>'
+                    '<div style="font-family:sans-serif;max-width:480px;margin:auto">'
+                    + '<h2 style="color:#3a6b1e">Reset hasla</h2>'
+                    + '<p>Kliknij przycisk ponizej aby ustawic nowe haslo. Link wygasa po <strong>1 godzinie</strong>.</p>'
+                    + '<p><a href="'+link+'" style="display:inline-block;background:#3a6b1e;color:#fff;padding:13px 28px;border-radius:10px;text-decoration:none;font-weight:bold;font-size:16px">Resetuj haslo</a></p>'
+                    + '<p style="color:#888;font-size:12px">Jesli nie prosiles o reset — zignoruj ta wiadomosc.</p>'
+                    + '<p style="color:#aaa;font-size:11px">Link: '+link+'</p>'
+                    + '</div>'
                 );
-            } catch(mailErr) {
-                console.error('Blad wysylania emaila reset:', mailErr.message);
-                // Nie przerywaj — token jest zapisany, link zalogowany do konsoli
-            }
+            } catch(mailErr) { console.error('Mail error:', mailErr.message); }
         }
-        // Zawsze zwracaj sukces (nie ujawniaj czy email istnieje)
         res.json({ success: true, message: 'Jesli konto istnieje, wyslalismy link na podany email.' });
     } catch(e) { console.error('reset-password error:', e); res.status(500).json({ error: e.message }); }
 });
@@ -1010,13 +1012,13 @@ app.post('/api/reset-password/confirm', async (req, res) => {
         const { token, newPassword } = req.body;
         if (!token || !newPassword) return res.status(400).json({ error: 'Brak danych' });
         if (newPassword.length < 6) return res.status(400).json({ error: 'Haslo min. 6 znakow' });
-        const entry = tokenStore.get(token);
-        if (!entry || entry.expires < Date.now()) return res.status(400).json({ error: 'Token wygasl lub jest nieprawidlowy' });
-        const user = await User.findById(entry.userId);
+        const rt = await ResetToken.findOne({ token, expiresAt: { $gt: new Date() } });
+        if (!rt) return res.status(400).json({ error: 'Link wygasl lub jest nieprawidlowy. Popros o nowy.' });
+        const user = await User.findById(rt.userId);
         if (!user) return res.status(404).json({ error: 'Nie znaleziono uzytkownika' });
         user.passwordHash = await bcrypt.hash(newPassword, 10);
         await user.save();
-        tokenStore.delete(token);
-        res.json({ success: true, message: 'Haslo zmienione. Mozesz sie zalogowac.' });
+        await ResetToken.deleteMany({ userId: rt.userId });
+        res.json({ success: true, message: 'Haslo zmienione! Mozesz sie zalogowac.' });
     } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
