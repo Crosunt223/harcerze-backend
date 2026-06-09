@@ -10,20 +10,23 @@ const crypto     = require('crypto');
 let transporter = null;
 try {
     const nodemailer = require('nodemailer');
-    if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-        const port = parseInt(process.env.SMTP_PORT || '587');
-        transporter = nodemailer.createTransport({
+    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        const isGmail = (process.env.SMTP_HOST || '').includes('gmail');
+        transporter = nodemailer.createTransport(isGmail ? {
+            service: 'gmail',
+            auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+        } : {
             host:   process.env.SMTP_HOST,
-            port:   port,
-            secure: port === 465,
+            port:   parseInt(process.env.SMTP_PORT || '587'),
+            secure: parseInt(process.env.SMTP_PORT || '587') === 465,
             auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
             tls:    { rejectUnauthorized: false }
         });
         transporter.verify(function(err) {
             if (err) console.error('SMTP blad polaczenia:', err.message);
-            else     console.log('SMTP OK:', process.env.SMTP_HOST + ':' + port);
+            else     console.log('SMTP OK:', process.env.SMTP_HOST);
         });
-    } else { console.log('SMTP: brak zmiennych srodowiskowych'); }
+    } else { console.log('SMTP: brak SMTP_USER/SMTP_PASS'); }
 } catch(e) { console.log('Nodemailer error:', e.message); }
 const APP_URL = process.env.FRONTEND_URL || process.env.APP_URL || 'http://localhost:3000';
 async function sendEmail(to, subject, html) {
@@ -224,15 +227,32 @@ app.post('/api/register', async (req, res) => {
         const role   = juzMaDruzynowego ? 'user'    : 'druzynowy';
         const status = juzMaDruzynowego ? 'pending' : 'active';
 
+        const emailVal = (req.body.email || '').trim().toLowerCase() || null;
         await User.create({
             username: username.toLowerCase().trim(),
             passwordHash: await bcrypt.hash(password, 10),
             name: name.trim(), role, teamId, status,
-            email: (req.body.email || '').trim() || null
+            email: emailVal
         });
 
-        const msg = role === 'admin'
-            ? 'Konto admina druzyny utworzone! Mozesz sie zalogowac.'
+        // Wyslij email powitalny jesli podano
+        if (emailVal) {
+            try {
+                await sendEmail(emailVal,
+                    'Witaj w Ksiazeczce Harcerskiej!',
+                    '<div style="font-family:sans-serif;max-width:480px;margin:auto">'
+                    + '<h2 style="color:#3a6b1e">Czuwaj, ' + name.trim() + '!</h2>'
+                    + '<p>Twoje konto zostało utworzone. '
+                    + (status === 'active' ? 'Możesz się już zalogować.' : 'Poczekaj na akceptację drużynowego.')
+                    + '</p>'
+                    + '<p><a href="' + APP_URL + '" style="background:#3a6b1e;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Przejdź do aplikacji</a></p>'
+                    + '</div>'
+                );
+            } catch(mailErr) { console.error('Mail rejestracja error:', mailErr.message); }
+        }
+
+        const msg = status === 'active'
+            ? 'Konto druzynowego utworzone! Mozesz sie zalogowac.'
             : 'Konto utworzone! Czeka na akceptacje druzynowego.';
 
         res.json({ success: true, message: msg, role });
@@ -978,8 +998,16 @@ app.post('/api/me/change-email', requireAuth, async (req, res) => {
             return res.status(403).json({ error: 'Nieprawidlowe haslo' });
         const exists = await User.findOne({ email: newEmail.toLowerCase().trim(), _id: { $ne: user._id } });
         if (exists) return res.status(400).json({ error: 'Ten email jest juz zajety' });
-        user.email = newEmail.toLowerCase().trim();
+        const newEmailLow = newEmail.toLowerCase().trim();
+        user.email = newEmailLow;
         await user.save();
+        try {
+            await sendEmail(newEmailLow,
+                'Email zaktualizowany — Ksiazeczka Harcerska',
+                '<p>Twój adres email w aplikacji Ksiazeczka Harcerska został zmieniony na: <strong>' + newEmailLow + '</strong></p>'
+                + '<p>Jeśli to nie Ty — skontaktuj się z drużynowym.</p>'
+            );
+        } catch(e) { console.error('Mail change-email:', e.message); }
         res.json({ success: true, message: 'Email zaktualizowany' });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
