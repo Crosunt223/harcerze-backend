@@ -237,8 +237,7 @@ app.post('/api/register', async (req, res) => {
 
         // Wyslij email powitalny jesli podano
         if (emailVal) {
-            try {
-                await sendEmail(emailVal,
+            sendEmail(emailVal,
                     'Witaj w Ksiazeczce Harcerskiej!',
                     '<div style="font-family:sans-serif;max-width:480px;margin:auto">'
                     + '<h2 style="color:#3a6b1e">Czuwaj, ' + name.trim() + '!</h2>'
@@ -247,8 +246,7 @@ app.post('/api/register', async (req, res) => {
                     + '</p>'
                     + '<p><a href="' + APP_URL + '" style="background:#3a6b1e;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Przejdź do aplikacji</a></p>'
                     + '</div>'
-                );
-            } catch(mailErr) { console.error('Mail rejestracja error:', mailErr.message); }
+                ).catch(function(e){ console.error('Mail register error:', e.message); });
         }
 
         const msg = status === 'active'
@@ -1001,13 +999,11 @@ app.post('/api/me/change-email', requireAuth, async (req, res) => {
         const newEmailLow = newEmail.toLowerCase().trim();
         user.email = newEmailLow;
         await user.save();
-        try {
-            await sendEmail(newEmailLow,
+        sendEmail(newEmailLow,
                 'Email zaktualizowany — Ksiazeczka Harcerska',
                 '<p>Twój adres email w aplikacji Ksiazeczka Harcerska został zmieniony na: <strong>' + newEmailLow + '</strong></p>'
                 + '<p>Jeśli to nie Ty — skontaktuj się z drużynowym.</p>'
-            );
-        } catch(e) { console.error('Mail change-email:', e.message); }
+            ).catch(function(e){ console.error('Mail change-email:', e.message); });
         res.json({ success: true, message: 'Email zaktualizowany' });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1027,8 +1023,7 @@ app.post('/api/reset-password', async (req, res) => {
             await ResetToken.create({ userId: user._id, token, expiresAt: new Date(Date.now() + 60*60*1000) });
             const link = APP_URL + '/?resetToken=' + token;
             console.log('=== RESET LINK ==='); console.log(link); console.log('==================');
-            try {
-                await sendEmail(user.email,
+            sendEmail(user.email,
                     'Reset hasla — Ksiazeczka Harcerska',
                     '<div style="font-family:sans-serif;max-width:480px;margin:auto">'
                     + '<h2 style="color:#3a6b1e">Reset hasla</h2>'
@@ -1037,8 +1032,7 @@ app.post('/api/reset-password', async (req, res) => {
                     + '<p style="color:#888;font-size:12px">Jesli nie prosiles o reset — zignoruj ta wiadomosc.</p>'
                     + '<p style="color:#aaa;font-size:11px">Link: '+link+'</p>'
                     + '</div>'
-                );
-            } catch(mailErr) { console.error('Mail error:', mailErr.message); }
+                ).catch(function(e){ console.error('Mail reset error:', e.message); });
         }
         res.json({ success: true, message: 'Jesli konto istnieje, wyslalismy link na podany email.' });
     } catch(e) { console.error('reset-password error:', e); res.status(500).json({ error: e.message }); }
