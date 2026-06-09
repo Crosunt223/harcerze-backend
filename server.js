@@ -11,19 +11,28 @@ let transporter = null;
 try {
     const nodemailer = require('nodemailer');
     if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+        const port = parseInt(process.env.SMTP_PORT || '587');
         transporter = nodemailer.createTransport({
             host:   process.env.SMTP_HOST,
-            port:   parseInt(process.env.SMTP_PORT || '587'),
-            secure: process.env.SMTP_SECURE === 'true',
-            auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+            port:   port,
+            secure: port === 465,
+            auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+            tls:    { rejectUnauthorized: false }
         });
-        console.log('SMTP OK:', process.env.SMTP_HOST);
-    }
-} catch(e) { console.log('Nodemailer niedostepny'); }
+        transporter.verify(function(err) {
+            if (err) console.error('SMTP blad polaczenia:', err.message);
+            else     console.log('SMTP OK:', process.env.SMTP_HOST + ':' + port);
+        });
+    } else { console.log('SMTP: brak zmiennych srodowiskowych'); }
+} catch(e) { console.log('Nodemailer error:', e.message); }
 const APP_URL = process.env.FRONTEND_URL || process.env.APP_URL || 'http://localhost:3000';
 async function sendEmail(to, subject, html) {
-    if (transporter) { await transporter.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to, subject, html }); }
-    else { console.log('EMAIL (brak SMTP) do:', to, '| Temat:', subject); }
+    if (!transporter) { console.log('EMAIL (brak SMTP):', to, subject); return; }
+    await transporter.sendMail({
+        from: '"Ksiazeczka Harcerska" <' + (process.env.SMTP_FROM || process.env.SMTP_USER) + '>',
+        to, subject, html
+    });
+    console.log('Email wyslany do:', to);
 }
 
 const app = express();
