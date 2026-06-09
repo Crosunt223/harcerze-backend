@@ -50,9 +50,6 @@ const PORT        = process.env.PORT        || 3000;
 // MONGODB
 // ================================================================
 
-mongoose.connect(MONGODB_URI)
-    .then(() => { console.log('MongoDB OK'); seedData(); })
-    .catch(err => console.error('MongoDB BLAD:', err));
 
 // ================================================================
 // MODELE
@@ -71,7 +68,8 @@ const userSchema = new mongoose.Schema({
     role:         { type: String, enum: ['superadmin','ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy','user'], default: 'user' },
     teamId:       { type: String, default: null },
     zastepId:     { type: String, default: null },
-    status:       { type: String, enum: ['active','pending','rejected','unverified'], default: 'pending' }
+    status:       { type: String, enum: ['active','pending','rejected','unverified'], default: 'pending' },
+    mustChangePassword: { type: Boolean, default: false }
 }, { timestamps: true });
 
 const progressSchema = new mongoose.Schema({
@@ -952,6 +950,33 @@ app.get('/api/my-zastep', requireAuth, async (req, res) => {
 
 app.get('/api/ping', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
+mongoose.connect(MONGODB_URI)
+    .then(() => { console.log('MongoDB OK'); seedData(); })
+    .catch(err => console.error('MongoDB BLAD:', err));
+
+// ================================================================
+// RESET CAŁEJ BAZY — tylko superadmin
+// ================================================================
+app.post('/api/admin/factory-reset', requireAuth, async (req, res) => {
+    try {
+        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Brak uprawnień' });
+        // Usuń wszystkich użytkowników oprócz admina
+        await User.deleteMany({ username: { $ne: 'admin' } });
+        // Usuń cały progress
+        await Progress.deleteMany({});
+        // Usuń tokeny resetów
+        await ResetToken.deleteMany({});
+        // Zresetuj hasło admina na 'admin' i ustaw flagę wymuszenia zmiany
+        const adminHash = await bcrypt.hash('admin', 10);
+        await User.findOneAndUpdate(
+            { username: 'admin' },
+            { passwordHash: adminHash, mustChangePassword: true }
+        );
+        console.log('FACTORY RESET wykonany przez:', req.user.username);
+        res.json({ success: true, message: 'Baza zresetowana. Hasło admina: admin' });
+    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
 app.listen(PORT, () => console.log('Serwer port ' + PORT));
 // ================================================================
 // /api/me — dane zalogowanego użytkownika
@@ -977,6 +1002,7 @@ app.post('/api/me/change-password', requireAuth, async (req, res) => {
         if (!(await bcrypt.compare(currentPassword, user.passwordHash)))
             return res.status(403).json({ error: 'Obecne haslo jest nieprawidlowe' });
         user.passwordHash = await bcrypt.hash(newPassword, 10);
+        user.mustChangePassword = false;
         await user.save();
         res.json({ success: true, message: 'Haslo zmienione pomyslnie' });
     } catch(e) { res.status(500).json({ error: e.message }); }
