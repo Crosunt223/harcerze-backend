@@ -7,36 +7,35 @@ const jwt        = require('jsonwebtoken');
 const crypto     = require('crypto');
 
 // NODEMAILER
-let transporter = null;
-try {
-    const nodemailer = require('nodemailer');
-    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-        const isGmail = (process.env.SMTP_HOST || '').includes('gmail');
-        transporter = nodemailer.createTransport(isGmail ? {
-            service: 'gmail',
-            auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-        } : {
-            host:   process.env.SMTP_HOST,
-            port:   parseInt(process.env.SMTP_PORT || '587'),
-            secure: parseInt(process.env.SMTP_PORT || '587') === 465,
-            auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-            tls:    { rejectUnauthorized: false }
-        });
-        transporter.verify(function(err) {
-            if (err) console.error('SMTP blad polaczenia:', err.message);
-            else     console.log('SMTP OK:', process.env.SMTP_HOST);
-        });
-    } else { console.log('SMTP: brak SMTP_USER/SMTP_PASS'); }
-} catch(e) { console.log('Nodemailer error:', e.message); }
+const fetch = (...args) => import('node-fetch').then(({default: f}) => f(...args));
 const APP_URL = process.env.FRONTEND_URL || process.env.APP_URL || 'http://localhost:3000';
+
 async function sendEmail(to, subject, html) {
-    if (!transporter) { console.log('EMAIL (brak SMTP):', to, subject); return; }
-    await transporter.sendMail({
-        from: '"Ksiazeczka Harcerska" <' + (process.env.SMTP_FROM || process.env.SMTP_USER) + '>',
-        to, subject, html
-    });
-    console.log('Email wyslany do:', to);
+    // Resend API (HTTPS - działa na Render)
+    if (process.env.RESEND_API_KEY) {
+        const resp = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ from: 'Ksiazeczka Harcerska <onboarding@resend.dev>', to: [to], subject, html })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error('Resend error: ' + JSON.stringify(data));
+        console.log('Email wyslany (Resend) do:', to);
+        return;
+    }
+    // Fallback: nodemailer SMTP
+    try {
+        const nodemailer = require('nodemailer');
+        if (!process.env.SMTP_USER || !process.env.SMTP_PASS) { console.log('EMAIL (brak konfiguracji):', to); return; }
+        const t = nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } });
+        await t.sendMail({ from: process.env.SMTP_USER, to, subject, html });
+        console.log('Email wyslany (SMTP) do:', to);
+    } catch(e) { throw new Error('SMTP error: ' + e.message); }
 }
+
+if (process.env.RESEND_API_KEY) console.log('Email: Resend API');
+else if (process.env.SMTP_USER) console.log('Email: SMTP (moze nie dzialac na Render)');
+else console.log('Email: brak konfiguracji - linki beda w logach');
 
 const app = express();
 app.use(cors());
