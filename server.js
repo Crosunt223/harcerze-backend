@@ -7,35 +7,31 @@ const jwt        = require('jsonwebtoken');
 const crypto     = require('crypto');
 
 // NODEMAILER
-const fetch = (...args) => import('node-fetch').then(({default: f}) => f(...args));
 const APP_URL = process.env.FRONTEND_URL || process.env.APP_URL || 'http://localhost:3000';
 
-async function sendEmail(to, subject, html) {
-    // Resend API (HTTPS - działa na Render)
-    if (process.env.RESEND_API_KEY) {
-        const resp = await fetch('https://api.resend.com/emails', {
-            method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ from: 'Ksiazeczka Harcerska <onboarding@resend.dev>', to: [to], subject, html })
+let transporter = null;
+try {
+    const nodemailer = require('nodemailer');
+    if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+        transporter = nodemailer.createTransport({
+            host:   process.env.SMTP_HOST,
+            port:   parseInt(process.env.SMTP_PORT || '587'),
+            secure: false,
+            auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+            tls:    { rejectUnauthorized: false }
         });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error('Resend error: ' + JSON.stringify(data));
-        console.log('Email wyslany (Resend) do:', to);
-        return;
-    }
-    // Fallback: nodemailer SMTP
-    try {
-        const nodemailer = require('nodemailer');
-        if (!process.env.SMTP_USER || !process.env.SMTP_PASS) { console.log('EMAIL (brak konfiguracji):', to); return; }
-        const t = nodemailer.createTransport({ service: 'gmail', auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } });
-        await t.sendMail({ from: process.env.SMTP_USER, to, subject, html });
-        console.log('Email wyslany (SMTP) do:', to);
-    } catch(e) { throw new Error('SMTP error: ' + e.message); }
-}
+        console.log('SMTP skonfigurowany:', process.env.SMTP_HOST + ':' + (process.env.SMTP_PORT || '587'));
+    } else { console.log('SMTP: brak zmiennych'); }
+} catch(e) { console.log('Nodemailer error:', e.message); }
 
-if (process.env.RESEND_API_KEY) console.log('Email: Resend API');
-else if (process.env.SMTP_USER) console.log('Email: SMTP (moze nie dzialac na Render)');
-else console.log('Email: brak konfiguracji - linki beda w logach');
+async function sendEmail(to, subject, html) {
+    if (!transporter) { console.log('EMAIL (brak SMTP) do:', to); return; }
+    await transporter.sendMail({
+        from: '"Ksiazeczka Harcerska" <' + process.env.SMTP_USER + '>',
+        to, subject, html
+    });
+    console.log('Email wyslany do:', to);
+}
 
 const app = express();
 app.use(cors());
