@@ -6,32 +6,31 @@ const bcrypt     = require('bcryptjs');
 const jwt        = require('jsonwebtoken');
 const crypto     = require('crypto');
 
-// NODEMAILER
-const APP_URL = process.env.FRONTEND_URL || process.env.APP_URL || 'http://localhost:3000';
-
-let transporter = null;
-try {
-    const nodemailer = require('nodemailer');
-    if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-        transporter = nodemailer.createTransport({
-            host:   process.env.SMTP_HOST,
-            port:   parseInt(process.env.SMTP_PORT || '587'),
-            secure: false,
-            auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-            tls:    { rejectUnauthorized: false }
-        });
-        console.log('SMTP skonfigurowany:', process.env.SMTP_HOST + ':' + (process.env.SMTP_PORT || '587'));
-    } else { console.log('SMTP: brak zmiennych'); }
-} catch(e) { console.log('Nodemailer error:', e.message); }
+const APP_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
 async function sendEmail(to, subject, html) {
-    if (!transporter) { console.log('EMAIL (brak SMTP) do:', to); return; }
-    await transporter.sendMail({
-        from: '"Ksiazeczka Harcerska" <' + process.env.SMTP_USER + '>',
-        to, subject, html
+    if (!process.env.BREVO_API_KEY) {
+        console.log('EMAIL (brak BREVO_API_KEY) do:', to);
+        return;
+    }
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+            'api-key': process.env.BREVO_API_KEY,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            sender: { name: 'Ksiazeczka Harcerska', email: process.env.BREVO_SENDER || 'ksisappsupport@gmail.com' },
+            to: [{ email: to }],
+            subject: subject,
+            htmlContent: html
+        })
     });
-    console.log('Email wyslany do:', to);
+    const data = await res.json();
+    if (!res.ok) throw new Error('Brevo error: ' + JSON.stringify(data));
+    console.log('Email wyslany (Brevo) do:', to);
 }
+console.log('Email:', process.env.BREVO_API_KEY ? 'Brevo OK' : 'brak BREVO_API_KEY - emaile nie beda wysylane');
 
 const app = express();
 app.use(cors());
@@ -45,6 +44,9 @@ const PORT        = process.env.PORT        || 3000;
 // MONGODB
 // ================================================================
 
+mongoose.connect(MONGODB_URI)
+    .then(() => { console.log('MongoDB OK'); seedData(); })
+    .catch(err => console.error('MongoDB BLAD:', err));
 
 // ================================================================
 // MODELE
@@ -56,26 +58,34 @@ const teamSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const userSchema = new mongoose.Schema({
-    username:     { type: String, required: true, unique: true, lowercase: true, trim: true },
-    passwordHash: { type: String, required: true },
-    name:         { type: String, required: true },
-    email:        { type: String, default: null },
-    role:         { type: String, enum: ['superadmin','ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy','user'], default: 'user' },
-    teamId:       { type: String, default: null },
-    zastepId:     { type: String, default: null },
-    status:       { type: String, enum: ['active','pending','rejected','unverified'], default: 'pending' },
+    username:           { type: String, required: true, unique: true, lowercase: true, trim: true },
+    passwordHash:       { type: String, required: true },
+    name:               { type: String, required: true },
+    email:              { type: String, default: null },
+    emailVerified:      { type: Boolean, default: false },
+    role:               { type: String, enum: ['superadmin','ksis','instruktor','druzynowy','przyboczny','zastepowy','podzastepowy','user'], default: 'user' },
+    teamId:             { type: String, default: null },
+    zastepId:           { type: String, default: null },
+    status:             { type: String, enum: ['active','pending','rejected','unverified'], default: 'pending' },
     mustChangePassword: { type: Boolean, default: false }
 }, { timestamps: true });
 
 const progressSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true, ref: 'User' },
-    tasks:  { type: mongoose.Schema.Types.Mixed, default: {} },
-    dates:  { type: mongoose.Schema.Types.Mixed, default: {} }
+    tasks:  { type: mongoose.Schema.Types.Mixed, default: {} }
 }, { timestamps: true });
 
 const Team     = mongoose.model('Team',     teamSchema);
 const User     = mongoose.model('User',     userSchema);
 const Progress = mongoose.model('Progress', progressSchema);
+
+const resetTokenSchema = new mongoose.Schema({
+    userId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    token:     { type: String, required: true, unique: true },
+    type:      { type: String, enum: ['verify','reset'], default: 'verify' },
+    expiresAt: { type: Date, required: true }
+}, { timestamps: true });
+const ResetToken = mongoose.model('ResetToken', resetTokenSchema);
 
 const zastepSchema = new mongoose.Schema({
     zastepId: { type: String, required: true, unique: true },
@@ -116,13 +126,6 @@ const boardSchema = new mongoose.Schema({
 }, { timestamps: true });
 const Board = mongoose.model('Board', boardSchema);
 
-const resetTokenSchema = new mongoose.Schema({
-    userId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    token:     { type: String, required: true, unique: true },
-    expiresAt: { type: Date, required: true, index: { expires: 0 } }
-}, { timestamps: true });
-const ResetToken = mongoose.model('ResetToken', resetTokenSchema);
-
 
 // ================================================================
 // SEED — domyslne druzyny + konto admin/admin
@@ -143,14 +146,19 @@ async function seedData() {
     }
     console.log('Druzyny OK');
 
-    // Super-admin — zawsze aktualizuj haslo i status
-    const adminHash = await bcrypt.hash('admin', 10);
-    await User.findOneAndUpdate(
-        { username: 'admin' },
-        { $set: { username:'admin', passwordHash:adminHash, name:'Super Admin', role:'superadmin', teamId:null, status:'active', email: null } },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-    console.log('Super-admin OK  login:admin  haslo:admin');
+    // Super-admin — login: admin, haslo: admin
+    const exists = await User.findOne({ username: 'admin' });
+    if (!exists) {
+        await User.create({
+            username:     'admin',
+            passwordHash: await bcrypt.hash('admin', 10),
+            name:         'Super Admin',
+            role:         'superadmin',
+            teamId:       null,
+            status:       'active'
+        });
+        console.log('Super-admin utworzony  login:admin  haslo:admin');
+    }
 }
 
 // ================================================================
@@ -198,62 +206,80 @@ function requireSuperAdmin(req, res, next) {
 // AUTH
 // ================================================================
 
-// Rejestracja
-// Pierwszy uzytkownik w druzynie automatycznie zostaje adminem
+// Rejestracja — wymaga emaila, tworzy konto unverified, wysyła link weryfikacyjny
 app.post('/api/register', async (req, res) => {
     try {
         const { username, password, name, teamId } = req.body;
+        const emailVal = (req.body.email || '').trim().toLowerCase() || null;
 
         if (!username || !password || !name || !teamId)
             return res.status(400).json({ success: false, message: 'Wszystkie pola sa wymagane' });
+        if (!emailVal || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailVal))
+            return res.status(400).json({ success: false, message: 'Podaj prawidlowy adres email' });
         if (username.trim().length < 3)
             return res.status(400).json({ success: false, message: 'Login min. 3 znaki' });
         if (password.length < 6)
             return res.status(400).json({ success: false, message: 'Haslo min. 6 znakow' });
         if (await User.findOne({ username: username.toLowerCase().trim() }))
             return res.status(400).json({ success: false, message: 'Ten login jest zajety' });
+        if (await User.findOne({ email: emailVal }))
+            return res.status(400).json({ success: false, message: 'Ten email jest juz zarejestrowany' });
         if (!(await Team.findOne({ teamId })))
             return res.status(400).json({ success: false, message: 'Druzyna nie istnieje' });
 
-        // Jesli nikt w druzynie nie ma rangi druzynowego lub wyzszej -> pierwszy user zostaje druzynowym
         const juzMaDruzynowego = await User.findOne({ teamId, role: { $in: ['ksis','instruktor','druzynowy'] }, status: 'active' });
-        const role   = juzMaDruzynowego ? 'user'    : 'druzynowy';
-        const status = juzMaDruzynowego ? 'pending' : 'active';
+        const role = juzMaDruzynowego ? 'user' : 'druzynowy';
 
-        const emailVal = (req.body.email || '').trim().toLowerCase() || null;
-        await User.create({
+        const user = await User.create({
             username: username.toLowerCase().trim(),
             passwordHash: await bcrypt.hash(password, 10),
-            name: name.trim(), role, teamId, status,
-            email: emailVal
+            name: name.trim(), role, teamId,
+            email: emailVal, emailVerified: false,
+            status: 'unverified'
         });
 
-        // Wyslij email powitalny jesli podano
-        if (emailVal) {
-            sendEmail(emailVal,
-                    'Witaj w Ksiazeczce Harcerskiej!',
-                    '<div style="font-family:sans-serif;max-width:480px;margin:auto">'
-                    + '<h2 style="color:#3a6b1e">Czuwaj, ' + name.trim() + '!</h2>'
-                    + '<p>Twoje konto zostało utworzone. '
-                    + (status === 'active' ? 'Możesz się już zalogować.' : 'Poczekaj na akceptację drużynowego.')
-                    + '</p>'
-                    + '<p><a href="' + APP_URL + '" style="background:#3a6b1e;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none;font-weight:bold">Przejdź do aplikacji</a></p>'
-                    + '</div>'
-                ).catch(function(e){ console.error('Mail register error:', e.message); });
-        }
+        // Token weryfikacyjny (7 dni)
+        const token = crypto.randomBytes(32).toString('hex');
+        await ResetToken.create({ userId: user._id, token, type: 'verify', expiresAt: new Date(Date.now() + 7*24*60*60*1000) });
+        const verifyLink = APP_URL + '/?verify=' + token;
+        console.log('=== VERIFY LINK dla', emailVal, '===\n' + verifyLink + '\n===');
 
-        const msg = status === 'active'
-            ? 'Konto druzynowego utworzone! Mozesz sie zalogowac.'
-            : 'Konto utworzone! Czeka na akceptacje druzynowego.';
+        // Wyslij email (Resend)
+        sendEmail(emailVal,
+            'Potwierdź email — Ksiazeczka Harcerska',
+            '<div style="font-family:sans-serif;max-width:500px;margin:auto;padding:24px;background:#f9fafb;border-radius:12px">'
+            + '<h2 style="color:#1a4d1a">Czuwaj, ' + name.trim() + '! 🌿</h2>'
+            + '<p style="color:#444">Kliknij przycisk poniżej aby potwierdzić swój adres email i aktywować konto:</p>'
+            + '<div style="text-align:center;margin:28px 0">'
+            + '<a href="' + verifyLink + '" style="background:#2d7a2d;color:#fff;padding:14px 32px;border-radius:10px;text-decoration:none;font-weight:bold;font-size:16px">✅ Potwierdź email</a>'
+            + '</div>'
+            + '<p style="color:#888;font-size:12px">Po potwierdzeniu emaila poczekaj na akceptację drużynowego.<br>Link ważny 7 dni. Jeśli przycisk nie działa: ' + verifyLink + '</p>'
+            + '</div>'
+        ).catch(e => console.error('Email error:', e.message));
 
-        res.json({ success: true, message: msg, role });
+        res.json({ success: true, role, verifyLink });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, message: 'Blad serwera: ' + err.message });
     }
 });
 
-// Logowanie — zwraca JWT wazny 7 dni
+// Weryfikacja emaila
+app.get('/api/verify-email', async (req, res) => {
+    try {
+        const rt = await ResetToken.findOne({ token: req.query.token, type: 'verify', expiresAt: { $gt: new Date() } });
+        if (!rt) return res.redirect(APP_URL + '/?verifyError=1');
+        const user = await User.findById(rt.userId);
+        if (!user) return res.redirect(APP_URL + '/?verifyError=1');
+        user.emailVerified = true;
+        user.status = 'pending'; // czeka na akceptację drużynowego
+        await user.save();
+        await ResetToken.deleteOne({ _id: rt._id });
+        res.redirect(APP_URL + '/?verified=1');
+    } catch(e) { res.redirect(APP_URL + '/?verifyError=1'); }
+});
+
+// Logowanie
 app.post('/api/login', async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -263,22 +289,23 @@ app.post('/api/login', async (req, res) => {
         const user = await User.findOne({ username: username.toLowerCase().trim() });
         if (!user || !(await bcrypt.compare(password, user.passwordHash)))
             return res.status(401).json({ success: false, message: 'Bledny login lub haslo' });
+        if (user.status === 'unverified')
+            return res.status(403).json({ success: false, message: 'Potwierdź adres email — sprawdź skrzynkę pocztową.' });
         if (user.status === 'pending')
             return res.status(403).json({ success: false, message: 'Konto czeka na akceptację drużynowego.' });
         if (user.status === 'rejected')
-            return res.status(403).json({ success: false, message: 'Konto zostało odrzucone. Skontaktuj się z drużynowym.' });
+            return res.status(403).json({ success: false, message: 'Konto zostało odrzucone.' });
         if (user.status !== 'active')
             return res.status(403).json({ success: false, message: 'Konto nieaktywne.' });
 
         const token = jwt.sign(
             { id: user._id, username: user.username, role: user.role, teamId: user.teamId, name: user.name },
-            JWT_SECRET,
-            { expiresIn: '7d' }
+            JWT_SECRET, { expiresIn: '7d' }
         );
-
         res.json({
             success: true, token,
-            user: { id: user._id, username: user.username, name: user.name, role: user.role, teamId: user.teamId, status: user.status }
+            mustChangePassword: !!user.mustChangePassword,
+            user: { id: user._id, username: user.username, name: user.name, role: user.role, teamId: user.teamId, zastepId: user.zastepId, status: user.status }
         });
     } catch (err) {
         console.error(err);
@@ -469,20 +496,11 @@ app.get('/api/progress/:userId', requireAuth, async (req, res) => {
         if (req.user.role === 'user' && req.user.id.toString() !== req.params.userId)
             return res.status(403).json({ error: 'Brak uprawnien' });
         const p = await Progress.findOne({ userId: req.params.userId });
-        const tasks = p ? Object.fromEntries(Object.entries(p.toObject().tasks || {})) : {};
+        // Konwertuj na plain object (Mongoose Mixed moze zwrocic Map)
+        const tasks = p ? (p.tasks ? Object.fromEntries(
+            Object.entries(p.toObject().tasks || {})
+        ) : {}) : {};
         res.json(tasks);
-    } catch (err) {
-        res.status(500).json({ error: 'Blad serwera' });
-    }
-});
-
-app.get('/api/progress/:userId/dates', requireAuth, async (req, res) => {
-    try {
-        if (req.user.role === 'user' && req.user.id.toString() !== req.params.userId)
-            return res.status(403).json({ error: 'Brak uprawnien' });
-        const p = await Progress.findOne({ userId: req.params.userId });
-        const dates = p ? Object.fromEntries(Object.entries(p.toObject().dates || {})) : {};
-        res.json(dates);
     } catch (err) {
         res.status(500).json({ error: 'Blad serwera' });
     }
@@ -515,13 +533,7 @@ app.post('/api/progress', requireAuth, requireAdmin, async (req, res) => {
 
         const safeTaskId = taskId.replace(/[.]/g, '_');
         const key = 'tasks.' + safeTaskId;
-        const dateKey = 'dates.' + safeTaskId;
-        let update;
-        if (status) {
-            update = { $set: { [key]: true, [dateKey]: new Date().toISOString() } };
-        } else {
-            update = { $unset: { [key]: '', [dateKey]: '' } };
-        }
+        const update = status ? { $set: { [key]: true } } : { $unset: { [key]: '' } };
         const p = await Progress.findOneAndUpdate({ userId }, update, { upsert: true, new: true });
         res.json({ success: true, progress: p.tasks });
     } catch (err) {
@@ -945,132 +957,4 @@ app.get('/api/my-zastep', requireAuth, async (req, res) => {
 
 app.get('/api/ping', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
-mongoose.connect(MONGODB_URI)
-    .then(() => { console.log('MongoDB OK'); seedData(); })
-    .catch(err => console.error('MongoDB BLAD:', err));
-
-// ================================================================
-// RESET CAŁEJ BAZY — tylko superadmin
-// ================================================================
-app.post('/api/admin/factory-reset', requireAuth, async (req, res) => {
-    try {
-        if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Brak uprawnień' });
-        // Usuń wszystkich użytkowników oprócz admina
-        await User.deleteMany({ username: { $ne: 'admin' } });
-        // Usuń cały progress
-        await Progress.deleteMany({});
-        // Usuń tokeny resetów
-        await ResetToken.deleteMany({});
-        // Zresetuj hasło admina na 'admin' i ustaw flagę wymuszenia zmiany
-        const adminHash = await bcrypt.hash('admin', 10);
-        await User.findOneAndUpdate(
-            { username: 'admin' },
-            { passwordHash: adminHash, mustChangePassword: true }
-        );
-        console.log('FACTORY RESET wykonany przez:', req.user.username);
-        res.json({ success: true, message: 'Baza zresetowana. Hasło admina: admin' });
-    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
-});
-
 app.listen(PORT, () => console.log('Serwer port ' + PORT));
-// ================================================================
-// /api/me — dane zalogowanego użytkownika
-// ================================================================
-app.get('/api/me', requireAuth, async (req, res) => {
-    try {
-        const user = await User.findById(req.user.id, '-passwordHash');
-        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
-        res.json({ id: user._id, username: user.username, name: user.name, email: user.email || '', role: user.role, teamId: user.teamId, zastepId: user.zastepId, status: user.status });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ================================================================
-// /api/me/change-password — zmiana hasła
-// ================================================================
-app.post('/api/me/change-password', requireAuth, async (req, res) => {
-    try {
-        const { currentPassword, newPassword } = req.body;
-        if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Podaj oba hasla' });
-        if (newPassword.length < 6) return res.status(400).json({ error: 'Nowe haslo min. 6 znakow' });
-        const user = await User.findById(req.user.id);
-        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
-        if (!(await bcrypt.compare(currentPassword, user.passwordHash)))
-            return res.status(403).json({ error: 'Obecne haslo jest nieprawidlowe' });
-        user.passwordHash = await bcrypt.hash(newPassword, 10);
-        user.mustChangePassword = false;
-        await user.save();
-        res.json({ success: true, message: 'Haslo zmienione pomyslnie' });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ================================================================
-// /api/me/change-email — zmiana emaila
-// ================================================================
-app.post('/api/me/change-email', requireAuth, async (req, res) => {
-    try {
-        const { newEmail, password } = req.body;
-        if (!newEmail || !password) return res.status(400).json({ error: 'Podaj email i haslo' });
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) return res.status(400).json({ error: 'Nieprawidlowy email' });
-        const user = await User.findById(req.user.id);
-        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
-        if (!(await bcrypt.compare(password, user.passwordHash)))
-            return res.status(403).json({ error: 'Nieprawidlowe haslo' });
-        const exists = await User.findOne({ email: newEmail.toLowerCase().trim(), _id: { $ne: user._id } });
-        if (exists) return res.status(400).json({ error: 'Ten email jest juz zajety' });
-        const newEmailLow = newEmail.toLowerCase().trim();
-        user.email = newEmailLow;
-        await user.save();
-        sendEmail(newEmailLow,
-                'Email zaktualizowany — Ksiazeczka Harcerska',
-                '<p>Twój adres email w aplikacji Ksiazeczka Harcerska został zmieniony na: <strong>' + newEmailLow + '</strong></p>'
-                + '<p>Jeśli to nie Ty — skontaktuj się z drużynowym.</p>'
-            ).catch(function(e){ console.error('Mail change-email:', e.message); });
-        res.json({ success: true, message: 'Email zaktualizowany' });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ================================================================
-// Reset hasła — wyslij link
-// ================================================================
-// Reset hasla — MongoDB (trwale miedzy restartami)
-app.post('/api/reset-password', async (req, res) => {
-    try {
-        const { email } = req.body;
-        if (!email) return res.status(400).json({ error: 'Podaj email' });
-        const user = await User.findOne({ email: email.toLowerCase().trim() });
-        if (user) {
-            await ResetToken.deleteMany({ userId: user._id });
-            const token = crypto.randomBytes(32).toString('hex');
-            await ResetToken.create({ userId: user._id, token, expiresAt: new Date(Date.now() + 60*60*1000) });
-            const link = APP_URL + '/?resetToken=' + token;
-            console.log('=== RESET LINK ==='); console.log(link); console.log('==================');
-            sendEmail(user.email,
-                    'Reset hasla — Ksiazeczka Harcerska',
-                    '<div style="font-family:sans-serif;max-width:480px;margin:auto">'
-                    + '<h2 style="color:#3a6b1e">Reset hasla</h2>'
-                    + '<p>Kliknij przycisk ponizej aby ustawic nowe haslo. Link wygasa po <strong>1 godzinie</strong>.</p>'
-                    + '<p><a href="'+link+'" style="display:inline-block;background:#3a6b1e;color:#fff;padding:13px 28px;border-radius:10px;text-decoration:none;font-weight:bold;font-size:16px">Resetuj haslo</a></p>'
-                    + '<p style="color:#888;font-size:12px">Jesli nie prosiles o reset — zignoruj ta wiadomosc.</p>'
-                    + '<p style="color:#aaa;font-size:11px">Link: '+link+'</p>'
-                    + '</div>'
-                ).catch(function(e){ console.error('Mail reset error:', e.message); });
-        }
-        res.json({ success: true, message: 'Jesli konto istnieje, wyslalismy link na podany email.' });
-    } catch(e) { console.error('reset-password error:', e); res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/reset-password/confirm', async (req, res) => {
-    try {
-        const { token, newPassword } = req.body;
-        if (!token || !newPassword) return res.status(400).json({ error: 'Brak danych' });
-        if (newPassword.length < 6) return res.status(400).json({ error: 'Haslo min. 6 znakow' });
-        const rt = await ResetToken.findOne({ token, expiresAt: { $gt: new Date() } });
-        if (!rt) return res.status(400).json({ error: 'Link wygasl lub jest nieprawidlowy. Popros o nowy.' });
-        const user = await User.findById(rt.userId);
-        if (!user) return res.status(404).json({ error: 'Nie znaleziono uzytkownika' });
-        user.passwordHash = await bcrypt.hash(newPassword, 10);
-        await user.save();
-        await ResetToken.deleteMany({ userId: rt.userId });
-        res.json({ success: true, message: 'Haslo zmienione! Mozesz sie zalogowac.' });
-    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
-});
