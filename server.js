@@ -955,6 +955,90 @@ app.get('/api/my-zastep', requireAuth, async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Reset hasla - wysylanie linku
+app.post('/api/reset-password', async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.json({ success: true }); // zawsze sukces
+        const user = await User.findOne({ email: email.toLowerCase().trim() });
+        if (user) {
+            await ResetToken.deleteMany({ userId: user._id, type: 'reset' });
+            const token = crypto.randomBytes(32).toString('hex');
+            await ResetToken.create({ userId: user._id, token, type: 'reset', expiresAt: new Date(Date.now() + 60*60*1000) });
+            const link = APP_URL + '/?resetToken=' + token;
+            console.log('=== RESET LINK dla', email, '==='); console.log(link);
+            sendEmail(email,
+                'Reset hasla — Ksiazeczka Harcerska',
+                '<div style="font-family:sans-serif;max-width:500px;margin:auto;padding:24px">'
+                + '<h2 style="color:#1a4d1a">Reset hasla</h2>'
+                + '<p>Kliknij link ponizej aby ustawic nowe haslo (wazny 1h):</p>'
+                + '<p><a href="'+link+'" style="background:#2d7a2d;color:#fff;padding:14px 28px;border-radius:10px;text-decoration:none;font-weight:bold">Resetuj haslo</a></p>'
+                + '<p style="color:#888;font-size:12px">Jesli to nie Ty — zignoruj ta wiadomosc.</p>'
+                + '</div>'
+            ).catch(e => console.error('Mail reset error:', e.message));
+        }
+        res.json({ success: true, message: 'Jesli konto istnieje, wyslalismy link.' });
+    } catch(e) { console.error('reset-password error:', e); res.json({ success: true }); }
+});
+
+// Reset hasla - potwierdzenie
+app.post('/api/reset-password/confirm', async (req, res) => {
+    try {
+        const { token, newPassword } = req.body;
+        if (!token || !newPassword) return res.status(400).json({ error: 'Brak danych' });
+        if (newPassword.length < 6) return res.status(400).json({ error: 'Haslo min. 6 znakow' });
+        const rt = await ResetToken.findOne({ token, type: 'reset', expiresAt: { $gt: new Date() } });
+        if (!rt) return res.status(400).json({ error: 'Link wygasl lub nieprawidlowy' });
+        const user = await User.findById(rt.userId);
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono uzytkownika' });
+        user.passwordHash = await bcrypt.hash(newPassword, 10);
+        await user.save();
+        await ResetToken.deleteMany({ userId: rt.userId });
+        res.json({ success: true, message: 'Haslo zmienione!' });
+    } catch(e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// /api/me
+app.get('/api/me', requireAuth, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.id, '-passwordHash');
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
+        res.json({ id: user._id, username: user.username, name: user.name, email: user.email || '', role: user.role, teamId: user.teamId, zastepId: user.zastepId, status: user.status });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Zmiana hasla
+app.post('/api/me/change-password', requireAuth, async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+        if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Podaj oba hasla' });
+        if (newPassword.length < 6) return res.status(400).json({ error: 'Haslo min. 6 znakow' });
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
+        if (!(await bcrypt.compare(currentPassword, user.passwordHash)))
+            return res.status(403).json({ error: 'Obecne haslo nieprawidlowe' });
+        user.passwordHash = await bcrypt.hash(newPassword, 10);
+        user.mustChangePassword = false;
+        await user.save();
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Zmiana emaila
+app.post('/api/me/change-email', requireAuth, async (req, res) => {
+    try {
+        const { newEmail, password } = req.body;
+        if (!newEmail || !password) return res.status(400).json({ error: 'Podaj email i haslo' });
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ error: 'Nie znaleziono' });
+        if (!(await bcrypt.compare(password, user.passwordHash)))
+            return res.status(403).json({ error: 'Nieprawidlowe haslo' });
+        user.email = newEmail.toLowerCase().trim();
+        await user.save();
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/ping', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
 app.listen(PORT, () => console.log('Serwer port ' + PORT));
